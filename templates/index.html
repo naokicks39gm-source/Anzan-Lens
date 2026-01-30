@@ -3,7 +3,7 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1">
-    <title>Anzan-Lens - Universal OCR</title>
+    <title>Anzan-Lens - Multi Section OCR</title>
     <style>
         @import url('https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@400;500;600;700&family=Source+Sans+3:wght@400;600&display=swap');
 
@@ -97,10 +97,14 @@
             border: 1px solid rgba(0, 0, 0, 0.08);
         }
 
+        .section {
+            margin-top: 24px;
+        }
+
         .section-title {
             font-family: "Space Grotesk", sans-serif;
             font-weight: 600;
-            margin: 24px 0 12px;
+            margin: 0 0 12px;
             font-size: 18px;
         }
 
@@ -108,6 +112,7 @@
             overflow-x: auto;
             border-radius: 12px;
             border: 1px solid rgba(0, 0, 0, 0.08);
+            background: #fff;
         }
 
         table {
@@ -172,7 +177,7 @@
     <div class="page">
         <header>
             <h1 class="title">Anzan-Lens</h1>
-            <p class="subtitle">画像の構造を自律判定し、表もリストも最適に抽出します。</p>
+            <p class="subtitle">複合プリントの構造を自動判別して抽出します。</p>
         </header>
 
         <div class="card">
@@ -184,42 +189,72 @@
             <div id="status">準備完了。画像を貼り付けてください。</div>
         </div>
 
-        <div id="table-section" class="hidden">
-            <div class="section-title">表形式の抽出結果</div>
-            <div class="table-wrapper">
-                <table id="result-table">
-                    <thead><tr id="table-header"></tr></thead>
-                    <tbody id="table-body"></tbody>
-                </table>
-            </div>
-        </div>
-
-        <div id="list-section" class="hidden">
-            <div class="section-title">問題・解答リスト</div>
-            <div id="list-body" class="list-card"></div>
-        </div>
+        <div id="sections"></div>
     </div>
 
     <script>
         const statusEl = document.getElementById('status');
         const previewEl = document.getElementById('preview');
-        const tableSection = document.getElementById('table-section');
-        const listSection = document.getElementById('list-section');
-        const header = document.getElementById('table-header');
-        const body = document.getElementById('table-body');
-        const listBody = document.getElementById('list-body');
+        const sectionsEl = document.getElementById('sections');
 
-        function showSection(type) {
-            if (type === 'table') {
-                tableSection.classList.remove('hidden');
-                listSection.classList.add('hidden');
-            } else if (type === 'list') {
-                listSection.classList.remove('hidden');
-                tableSection.classList.add('hidden');
-            } else {
-                tableSection.classList.add('hidden');
-                listSection.classList.add('hidden');
+        function renderTableSection(section) {
+            const results = section.results || [];
+            const headerCells = ["<th>No.</th>", ...results.map(r => `<th>第${r.column}列</th>`)].join('');
+
+            let bodyHtml = "";
+            for (let i = 0; i < 7; i++) {
+                bodyHtml += `<tr><td>${i + 1}</td>` + results.map(r => `<td>${r.numbers?.[i] ?? '0'}</td>`).join('') + `</tr>`;
             }
+            bodyHtml += `<tr class="total-row"><td>合計</td>` + results.map(r => `<td>${r.total ?? '0'}</td>`).join('') + `</tr>`;
+
+            return `
+                <div class="section">
+                    <div class="section-title">${section.title || 'みとりざん'}</div>
+                    <div class="table-wrapper">
+                        <table>
+                            <thead><tr>${headerCells}</tr></thead>
+                            <tbody>${bodyHtml}</tbody>
+                        </table>
+                    </div>
+                </div>
+            `;
+        }
+
+        function renderListSection(section) {
+            const items = section.items || [];
+            const cards = items.map((item, idx) => {
+                const num = item.number ? `${item.number}. ` : `${idx + 1}. `;
+                const expr = item.expression || "";
+                const answer = item.answer || "";
+                return `
+                    <div class="qa-item">
+                        <div class="qa-q">${num}${expr}</div>
+                        <div class="qa-a">解答: ${answer}</div>
+                    </div>
+                `;
+            }).join('');
+
+            return `
+                <div class="section">
+                    <div class="section-title">${section.title || 'リスト'}</div>
+                    <div class="list-card">${cards}</div>
+                </div>
+            `;
+        }
+
+        function renderSections(sections) {
+            if (!Array.isArray(sections) || sections.length === 0) {
+                sectionsEl.innerHTML = '';
+                return;
+            }
+
+            const html = sections.map(section => {
+                if (section.type === 'table') return renderTableSection(section);
+                if (section.type === 'list') return renderListSection(section);
+                return '';
+            }).join('');
+
+            sectionsEl.innerHTML = html;
         }
 
         document.onpaste = function(event) {
@@ -241,8 +276,8 @@
         };
 
         async function sendToGemini(base64Image) {
-            statusEl.innerText = "⏳ 画像構造を解析中...";
-            showSection(null);
+            statusEl.innerText = "⏳ 構造を解析中...";
+            sectionsEl.innerHTML = '';
 
             try {
                 const response = await fetch('/ocr', {
@@ -257,37 +292,13 @@
                     return;
                 }
 
-                if (data.format_type === 'table') {
-                    statusEl.innerText = "✅ 表形式で抽出しました";
-                    header.innerHTML = "<th>No.</th>" + data.results.map(r => `<th>第${r.column}列</th>`).join('');
-
-                    let bodyHtml = "";
-                    for (let i = 0; i < 7; i++) {
-                        bodyHtml += `<tr><td>${i+1}</td>` + data.results.map(r => `<td>${r.numbers[i] ?? '0'}</td>`).join('') + `</tr>`;
-                    }
-                    bodyHtml += `<tr class="total-row"><td>合計</td>` + data.results.map(r => `<td>${r.total ?? '0'}</td>`).join('') + `</tr>`;
-                    body.innerHTML = bodyHtml;
-                    showSection('table');
+                if (data.format_type !== 'multi') {
+                    statusEl.innerText = "⚠️ 形式判定に失敗しました。";
                     return;
                 }
 
-                if (data.format_type === 'list') {
-                    statusEl.innerText = "✅ リスト形式で抽出しました";
-                    listBody.innerHTML = data.items.map((item, idx) => {
-                        const q = item.question || `問題 ${idx + 1}`;
-                        const a = item.answer || "";
-                        return `
-                            <div class="qa-item">
-                                <div class="qa-q">${q}</div>
-                                <div class="qa-a">${a}</div>
-                            </div>
-                        `;
-                    }).join('');
-                    showSection('list');
-                    return;
-                }
-
-                statusEl.innerText = "⚠️ 形式判定に失敗しました。";
+                renderSections(data.sections || []);
+                statusEl.innerText = "✅ 抽出完了";
             } catch (err) {
                 statusEl.innerText = "❌ 通信エラーが発生しました。";
                 console.error(err);
