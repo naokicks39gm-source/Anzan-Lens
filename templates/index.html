@@ -1,0 +1,63 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+    <meta charset="UTF-8">
+    <title>Gemini OCR Pro</title>
+    <style>
+        body { font-family: -apple-system, sans-serif; padding: 30px; background: #f5f5f7; color: #1d1d1f; }
+        .container { max-width: 1200px; margin: 0 auto; }
+        #drop-area { 
+            border: 2px dashed #0071e3; padding: 60px; text-align: center; 
+            background: white; border-radius: 16px; cursor: pointer; margin-bottom: 30px;
+        }
+        .grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(160px, 1fr)); gap: 16px; }
+        .column-card { background: white; padding: 16px; border-radius: 12px; box-shadow: 0 4px 12px rgba(0,0,0,0.05); border: 1px solid #e5e5e5; }
+        .column-title { font-weight: bold; color: #0071e3; border-bottom: 2px solid #f0f0f0; margin-bottom: 8px; }
+        .total-box { margin-top: 12px; padding-top: 8px; border-top: 2px solid #0071e3; font-weight: bold; color: #d70035; }
+        img#preview { max-width: 400px; border-radius: 12px; display: none; margin: 0 auto 20px; }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <h1>Gemini OCR 🧮 みとりあんざん</h1>
+        <div id="drop-area">画像をペースト (Cmd+V)</div>
+        <center><img id="preview"></center>
+        <div id="status">準備完了。</div>
+        <div id="output" class="grid"></div>
+    </div>
+    <script>
+        document.addEventListener('paste', async (e) => {
+            const item = e.clipboardData.items[0];
+            if (item && item.type.indexOf('image') !== -1) {
+                const blob = item.getAsFile();
+                const reader = new FileReader();
+                reader.onload = async (event) => {
+                    const base64Image = event.target.result;
+                    document.getElementById('preview').src = base64Image;
+                    document.getElementById('preview').style.display = 'block';
+                    sendToGemini(base64Image);
+                };
+                reader.readAsDataURL(blob);
+            }
+        });
+        async function sendToGemini(base64Image) {
+            document.getElementById('status').innerText = "⏳ 解析中...";
+            const response = await fetch('/ocr', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ image: base64Image })
+            });
+            const data = await response.json();
+            document.getElementById('status').innerText = "✅ 完了";
+            const output = document.getElementById('output');
+            output.innerHTML = "";
+            data.results.forEach(res => {
+                const card = document.createElement('div');
+                card.className = 'column-card';
+                card.innerHTML = `<div class="column-title">第${res.column}列</div>${res.numbers.join('<br>')}<div class="total-box">合計: ${res.total}</div>`;
+                output.appendChild(card);
+            });
+        }
+    </script>
+</body>
+</html>
