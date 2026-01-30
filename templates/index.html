@@ -2,41 +2,226 @@
 <html lang="ja">
 <head>
     <meta charset="UTF-8">
-    <title>Gemini OCR - Precision View</title>
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>Anzan-Lens - Universal OCR</title>
     <style>
-        body { font-family: -apple-system, sans-serif; padding: 20px; background: #f0f2f5; }
-        .container { max-width: 1400px; margin: 0 auto; background: white; padding: 20px; border-radius: 12px; box-shadow: 0 4px 20px rgba(0,0,0,0.08); }
-        #drop-area { border: 3px dashed #0071e3; padding: 40px; text-align: center; margin-bottom: 20px; border-radius: 12px; background: #f8fbff; cursor: pointer; }
-        .table-wrapper { overflow-x: auto; margin-top: 20px; border: 1px solid #ddd; border-radius: 8px; }
-        table { width: 100%; border-collapse: collapse; min-width: 1200px; background: white; }
-        th, td { border: 1px solid #eee; padding: 12px 8px; text-align: center; }
-        th { background: #0071e3; color: white; position: sticky; top: 0; }
+        @import url('https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@400;500;600;700&family=Source+Sans+3:wght@400;600&display=swap');
+
+        :root {
+            --bg-1: #f7f4ee;
+            --bg-2: #edf7f2;
+            --ink: #1a1a1a;
+            --muted: #5a6a6a;
+            --accent: #0f766e;
+            --accent-2: #ff8a3d;
+            --card: #ffffff;
+            --ring: rgba(15, 118, 110, 0.25);
+            --shadow: 0 18px 50px rgba(14, 35, 34, 0.12);
+        }
+
+        * { box-sizing: border-box; }
+
+        body {
+            margin: 0;
+            font-family: "Source Sans 3", system-ui, sans-serif;
+            color: var(--ink);
+            background: radial-gradient(circle at top, #fff, var(--bg-1)) fixed,
+                        radial-gradient(circle at bottom right, #e7f0ff, var(--bg-2)) fixed;
+        }
+
+        .page {
+            max-width: 1200px;
+            margin: 0 auto;
+            padding: 32px 20px 60px;
+        }
+
+        header {
+            display: flex;
+            flex-direction: column;
+            gap: 12px;
+            margin-bottom: 24px;
+        }
+
+        .title {
+            font-family: "Space Grotesk", sans-serif;
+            font-size: clamp(28px, 4vw, 42px);
+            font-weight: 700;
+            margin: 0;
+        }
+
+        .subtitle {
+            margin: 0;
+            color: var(--muted);
+            font-size: 16px;
+        }
+
+        .card {
+            background: var(--card);
+            border-radius: 18px;
+            box-shadow: var(--shadow);
+            padding: 22px;
+        }
+
+        #drop-area {
+            border: 2px dashed rgba(15, 118, 110, 0.4);
+            border-radius: 16px;
+            padding: 26px;
+            text-align: center;
+            background: linear-gradient(135deg, rgba(15, 118, 110, 0.08), rgba(255, 138, 61, 0.08));
+            cursor: pointer;
+            transition: transform 0.2s ease, border-color 0.2s ease;
+        }
+
+        #drop-area:hover {
+            transform: translateY(-2px);
+            border-color: var(--accent);
+        }
+
+        #drop-area .hint {
+            color: var(--muted);
+            font-size: 0.9em;
+        }
+
+        #status {
+            margin: 16px 0;
+            font-weight: 600;
+            color: var(--accent);
+            text-align: center;
+        }
+
+        #preview {
+            max-height: 260px;
+            display: none;
+            margin: 14px auto 0;
+            border-radius: 12px;
+            border: 1px solid rgba(0, 0, 0, 0.08);
+        }
+
+        .section-title {
+            font-family: "Space Grotesk", sans-serif;
+            font-weight: 600;
+            margin: 24px 0 12px;
+            font-size: 18px;
+        }
+
+        .table-wrapper {
+            overflow-x: auto;
+            border-radius: 12px;
+            border: 1px solid rgba(0, 0, 0, 0.08);
+        }
+
+        table {
+            width: 100%;
+            border-collapse: collapse;
+            min-width: 900px;
+            background: #fff;
+        }
+
+        th, td {
+            border: 1px solid #f0f0f0;
+            padding: 10px 8px;
+            text-align: center;
+            font-size: 14px;
+        }
+
+        th {
+            background: #0f766e;
+            color: white;
+            position: sticky;
+            top: 0;
+        }
+
         tr:nth-child(even) { background: #fafafa; }
-        .total-row { font-weight: bold; background: #fff0f0 !important; color: #d70035; font-size: 1.1em; }
-        img#preview { max-height: 250px; display: none; margin: 10px auto; border-radius: 8px; border: 1px solid #ddd; }
-        #status { font-weight: bold; color: #0071e3; margin: 15px 0; text-align: center; font-size: 1.2em; }
+
+        .total-row {
+            font-weight: 700;
+            background: #fff2e7 !important;
+            color: #b45309;
+        }
+
+        .list-card {
+            display: grid;
+            gap: 12px;
+        }
+
+        .qa-item {
+            border-radius: 12px;
+            border: 1px solid rgba(0, 0, 0, 0.08);
+            padding: 14px 16px;
+            background: #fff;
+        }
+
+        .qa-q {
+            font-weight: 600;
+            margin-bottom: 6px;
+        }
+
+        .qa-a {
+            color: var(--muted);
+        }
+
+        .hidden { display: none; }
+
+        @media (max-width: 768px) {
+            .page { padding: 22px 16px 40px; }
+            #drop-area { padding: 22px; }
+        }
     </style>
 </head>
 <body>
-    <div class="container">
-        <h1>Gemini OCR 🧮 15列一括抽出</h1>
-        <div id="drop-area">
-            <p>ここに画像をペースト (Cmd+V)</p>
-            <p style="font-size: 0.8em; color: #666;">※スクリーンショット等を貼り付けてください</p>
+    <div class="page">
+        <header>
+            <h1 class="title">Anzan-Lens</h1>
+            <p class="subtitle">画像の構造を自律判定し、表もリストも最適に抽出します。</p>
+        </header>
+
+        <div class="card">
+            <div id="drop-area">
+                <p>ここに画像をペースト (Cmd+V)</p>
+                <p class="hint">スクリーンショットや写真を貼り付けてください</p>
+            </div>
+            <img id="preview" alt="preview" />
+            <div id="status">準備完了。画像を貼り付けてください。</div>
         </div>
-        <center><img id="preview"></center>
-        <div id="status">準備完了。画像を貼り付けてください。</div>
-        
-        <div class="table-wrapper">
-            <table id="result-table">
-                <thead><tr id="table-header"></tr></thead>
-                <tbody id="table-body"></tbody>
-            </table>
+
+        <div id="table-section" class="hidden">
+            <div class="section-title">表形式の抽出結果</div>
+            <div class="table-wrapper">
+                <table id="result-table">
+                    <thead><tr id="table-header"></tr></thead>
+                    <tbody id="table-body"></tbody>
+                </table>
+            </div>
+        </div>
+
+        <div id="list-section" class="hidden">
+            <div class="section-title">問題・解答リスト</div>
+            <div id="list-body" class="list-card"></div>
         </div>
     </div>
 
     <script>
-        // ペーストイベントを確実に捕捉
+        const statusEl = document.getElementById('status');
+        const previewEl = document.getElementById('preview');
+        const tableSection = document.getElementById('table-section');
+        const listSection = document.getElementById('list-section');
+        const header = document.getElementById('table-header');
+        const body = document.getElementById('table-body');
+        const listBody = document.getElementById('list-body');
+
+        function showSection(type) {
+            if (type === 'table') {
+                tableSection.classList.remove('hidden');
+                listSection.classList.add('hidden');
+            } else if (type === 'list') {
+                listSection.classList.remove('hidden');
+                tableSection.classList.add('hidden');
+            } else {
+                tableSection.classList.add('hidden');
+                listSection.classList.add('hidden');
+            }
+        }
+
         document.onpaste = function(event) {
             const items = (event.clipboardData || event.originalEvent.clipboardData).items;
             for (let index in items) {
@@ -46,8 +231,8 @@
                     const reader = new FileReader();
                     reader.onload = function(event) {
                         const base64Image = event.target.result;
-                        document.getElementById('preview').src = base64Image;
-                        document.getElementById('preview').style.display = 'block';
+                        previewEl.src = base64Image;
+                        previewEl.style.display = 'block';
                         sendToGemini(base64Image);
                     };
                     reader.readAsDataURL(blob);
@@ -56,11 +241,9 @@
         };
 
         async function sendToGemini(base64Image) {
-            const status = document.getElementById('status');
-            const header = document.getElementById('table-header');
-            const body = document.getElementById('table-body');
-            status.innerText = "⏳ Geminiが15列の数値を精査中...";
-            
+            statusEl.innerText = "⏳ 画像構造を解析中...";
+            showSection(null);
+
             try {
                 const response = await fetch('/ocr', {
                     method: 'POST',
@@ -68,26 +251,45 @@
                     body: JSON.stringify({ image: base64Image })
                 });
                 const data = await response.json();
-                
-                if(data.error) {
-                    status.innerText = "❌ エラー: " + data.error;
+
+                if (data.error) {
+                    statusEl.innerText = "❌ エラー: " + data.error;
                     return;
                 }
 
-                status.innerText = "✅ 抽出完了";
-                // ヘッダー作成
-                header.innerHTML = "<th>No.</th>" + data.results.map(r => `<th>第${r.column}列</th>`).join('');
-                
-                // 行データ作成 (7行分)
-                let bodyHtml = "";
-                for (let i = 0; i < 7; i++) {
-                    bodyHtml += `<tr><td>${i+1}</td>` + data.results.map(r => `<td>${r.numbers[i] || '0'}</td>`).join('') + `</tr>`;
+                if (data.format_type === 'table') {
+                    statusEl.innerText = "✅ 表形式で抽出しました";
+                    header.innerHTML = "<th>No.</th>" + data.results.map(r => `<th>第${r.column}列</th>`).join('');
+
+                    let bodyHtml = "";
+                    for (let i = 0; i < 7; i++) {
+                        bodyHtml += `<tr><td>${i+1}</td>` + data.results.map(r => `<td>${r.numbers[i] ?? '0'}</td>`).join('') + `</tr>`;
+                    }
+                    bodyHtml += `<tr class="total-row"><td>合計</td>` + data.results.map(r => `<td>${r.total ?? '0'}</td>`).join('') + `</tr>`;
+                    body.innerHTML = bodyHtml;
+                    showSection('table');
+                    return;
                 }
-                // 合計行
-                bodyHtml += `<tr class="total-row"><td>合計</td>` + data.results.map(r => `<td>${r.total}</td>`).join('') + `</tr>`;
-                body.innerHTML = bodyHtml;
+
+                if (data.format_type === 'list') {
+                    statusEl.innerText = "✅ リスト形式で抽出しました";
+                    listBody.innerHTML = data.items.map((item, idx) => {
+                        const q = item.question || `問題 ${idx + 1}`;
+                        const a = item.answer || "";
+                        return `
+                            <div class="qa-item">
+                                <div class="qa-q">${q}</div>
+                                <div class="qa-a">${a}</div>
+                            </div>
+                        `;
+                    }).join('');
+                    showSection('list');
+                    return;
+                }
+
+                statusEl.innerText = "⚠️ 形式判定に失敗しました。";
             } catch (err) {
-                status.innerText = "❌ 通信エラーが発生しました。";
+                statusEl.innerText = "❌ 通信エラーが発生しました。";
                 console.error(err);
             }
         }

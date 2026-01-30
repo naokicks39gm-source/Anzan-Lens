@@ -17,11 +17,27 @@ client = genai.Client(
 )
 
 
-def build_fallback_results():
+def build_fallback_table():
     results = []
     for i in range(1, 16):
         results.append({"column": i, "numbers": [0, 0, 0, 0, 0, 0, 0], "total": 0})
-    return {"results": results}
+    return {"format_type": "table", "results": results}
+
+
+def build_fallback_list():
+    return {"format_type": "list", "items": []}
+
+
+def parse_json_from_text(text_response: str):
+    text_response = (text_response or "").strip()
+    if not text_response:
+        return None
+
+    json_match = re.search(r'\{.*\}', text_response, re.DOTALL)
+    if json_match:
+        return json.loads(json_match.group())
+
+    return json.loads(text_response)
 
 
 @app.route('/')
@@ -39,19 +55,34 @@ def perform_ocr():
         image_bytes = base64.b64decode(encoded)
 
         prompt = """
-        この画像は「みとりあんざん」の15列構成の計算シートです。
-        画像は上段(1-5)、中段(6-10)、下段(11-15)の3段構成になっています。
+        あなたは画像の構造を解析し、最適な形式でデータを抽出するOCRアシスタントです。
 
-        各列に含まれる7つの数字を正確に抽出し、合計値(total)と共に
-        以下のJSONフォーマットのみで出力してください。
-        読み取り不能な箇所は0で埋めて必ずJSONのみを返してください。
+        手順:
+        1) 画像が「15列の表形式」か「自由形式の問題/リスト形式」かを判断してください。
+        2) 形式に応じて、以下のいずれかのJSONだけを出力してください（前後に説明文やMarkdownは不要）。
 
+        A) 15列の表形式（format_type = "table"）:
         {
+          "format_type": "table",
           "results": [
             {"column": 1, "numbers": [85, 77, 59, 23, 74, 80, 97], "total": 495},
+            ... 15 columns total ...
+          ]
+        }
+
+        B) 自由形式（format_type = "list"）:
+        {
+          "format_type": "list",
+          "items": [
+            {"question": "問題文", "answer": "解答"},
             ...
           ]
         }
+
+        追加ルール:
+        - 読み取り不能な数値は0にしてください。
+        - 文字の読み取りが困難な場合は空文字で構いません。
+        - どちらの形式でも必ずJSONのみを返してください。
         """
 
         response = client.models.generate_content(
@@ -62,19 +93,25 @@ def perform_ocr():
             ],
         )
 
-        text_response = (response.text or "").strip()
-        json_match = re.search(r'\{.*\}', text_response, re.DOTALL)
-        if json_match:
-            return jsonify(json.loads(json_match.group()))
+        parsed = parse_json_from_text(response.text)
+        if not isinstance(parsed, dict):
+            return jsonify(build_fallback_list())
 
-        if text_response:
-            try:
-                return jsonify(json.loads(text_response))
-            except Exception:
-                pass
+        format_type = parsed.get("format_type")
+        if format_type == "table":
+            return jsonify(parsed)
+        if format_type == "list":
+            return jsonify(parsed)
 
-        # Fallback: return zeroed structure to avoid hard error
-        return jsonify(build_fallback_results())
+        # If model forgot format_type, infer best effort
+        if "results" in parsed:
+            parsed["format_type"] = "table"
+            return jsonify(parsed)
+        if "items" in parsed:
+            parsed["format_type"] = "list"
+            return jsonify(parsed)
+
+        return jsonify(build_fallback_list())
 
     except Exception as e:
         print(f"Server Error: {str(e)}")
