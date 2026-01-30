@@ -30,34 +30,133 @@
             const item = e.clipboardData.items[0];
             if (item && item.type.indexOf('image') !== -1) {
                 const blob = item.getAsFile();
-                const reader = new FileReader();
-                reader.onload = async (event) => {
-                    const base64Image = event.target.result;
-                    document.getElementById('preview').src = base64Image;
-                    document.getElementById('preview').style.display = 'block';
-                    sendToGemini(base64Image);
-                };
-                reader.readAsDataURL(blob);
-            }
-        });
-        async function sendToGemini(base64Image) {
-            document.getElementById('status').innerText = "⏳ 解析中...";
-            const response = await fetch('/ocr', {
-                method: 'POST',
-                headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({ image: base64Image })
-            });
-            const data = await response.json();
-            document.getElementById('status').innerText = "✅ 完了";
-            const output = document.getElementById('output');
-            output.innerHTML = "";
-            data.results.forEach(res => {
-                const card = document.createElement('div');
-                card.className = 'column-card';
-                card.innerHTML = `<div class="column-title">第${res.column}列</div>${res.numbers.join('<br>')}<div class="total-box">合計: ${res.total}</div>`;
-                output.appendChild(card);
-            });
-        }
-    </script>
-</body>
-</html>
+                <!DOCTYPE html>
+                <html lang="ja">
+                <head>
+                    <meta charset="UTF-8">
+                    <title>Gemini OCR Pro - Data Viewer</title>
+                    <meta name="viewport" content="width=device-width,initial-scale=1" />
+                    <style>
+                        body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, 'Helvetica Neue', Arial; padding: 20px; background: #f5f5f7; }
+                        .container { max-width: 1200px; margin: 0 auto; }
+                        #drop-area { border: 2px dashed #0071e3; padding: 40px; text-align: center; background: white; border-radius: 12px; margin-bottom: 20px; cursor: copy; }
+                        .grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(180px, 1fr)); gap: 12px; }
+                        .column-card { background: white; padding: 14px; border-radius: 8px; box-shadow: 0 2px 8px rgba(0,0,0,0.06); font-size: 0.95em; }
+                        .column-title { font-weight: 700; color: #0071e3; border-bottom: 1px solid #f0f4ff; margin-bottom: 8px; padding-bottom: 4px; }
+                        .total-box { margin-top: 10px; padding-top: 6px; border-top: 1px solid #e6f0ff; font-weight: 700; color: #d70035; }
+                        #debug-log { background: #111; color: #e6e6e6; padding: 12px; border-radius: 8px; margin-top: 20px; display: none; white-space: pre-wrap; font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, monospace; max-height: 360px; overflow: auto; }
+                        img#preview { max-width: 240px; display: none; margin: 10px auto; border-radius: 8px; box-shadow: 0 1px 6px rgba(0,0,0,0.08); }
+                        .controls { display:flex; gap:8px; align-items:center; margin-top:12px; }
+                        button { background:#0071e3; color:white; border: none; padding:8px 12px; border-radius:6px; cursor:pointer; }
+                        button.secondary { background: #e6eefc; color: #0071e3; }
+                    </style>
+                </head>
+                <body>
+                    <div class="container">
+                        <h1>Gemini OCR 🧮 読み取り結果</h1>
+                        <div id="drop-area">ここに画像をペーストまたはドラッグ&ドロップ</div>
+                        <center><img id="preview"></center>
+                        <div id="status">画像を貼り付けてください。</div>
+
+                        <div id="output" class="grid"></div>
+
+                        <div class="controls">
+                            <button id="show-raw">生データを表示</button>
+                            <button class="secondary" id="clear">クリア</button>
+                        </div>
+                        <div id="debug-log"></div>
+                    </div>
+
+                    <script>
+                        const drop = document.getElementById('drop-area');
+                        const preview = document.getElementById('preview');
+                        const status = document.getElementById('status');
+                        const output = document.getElementById('output');
+                        const debugLog = document.getElementById('debug-log');
+
+                        document.addEventListener('paste', async (e) => {
+                            const items = Array.from(e.clipboardData.items || []);
+                            const item = items.find(i => i.type.indexOf('image') !== -1);
+                            if (item) {
+                                const blob = item.getAsFile();
+                                const reader = new FileReader();
+                                reader.onload = (event) => {
+                                    preview.src = event.target.result;
+                                    preview.style.display = 'block';
+                                    sendToGemini(event.target.result);
+                                };
+                                reader.readAsDataURL(blob);
+                            }
+                        });
+
+                        // drag & drop support
+                        drop.addEventListener('dragover', (e) => { e.preventDefault(); drop.style.opacity = '0.9'; });
+                        drop.addEventListener('dragleave', () => { drop.style.opacity = '1'; });
+                        drop.addEventListener('drop', (e) => {
+                            e.preventDefault();
+                            drop.style.opacity = '1';
+                            const file = e.dataTransfer.files[0];
+                            if (file && file.type.startsWith('image')) {
+                                const reader = new FileReader();
+                                reader.onload = (ev) => {
+                                    preview.src = ev.target.result;
+                                    preview.style.display = 'block';
+                                    sendToGemini(ev.target.result);
+                                };
+                                reader.readAsDataURL(file);
+                            }
+                        });
+
+                        document.getElementById('show-raw').addEventListener('click', () => {
+                            debugLog.style.display = debugLog.style.display === 'block' ? 'none' : 'block';
+                        });
+
+                        document.getElementById('clear').addEventListener('click', () => {
+                            preview.style.display = 'none'; preview.src = '';
+                            output.innerHTML = '';
+                            status.innerText = '画像を貼り付けてください。';
+                            debugLog.style.display = 'none'; debugLog.innerText = '';
+                        });
+
+                        async function sendToGemini(base64Image) {
+                            status.innerText = "⏳ 解析中...";
+                            output.innerHTML = "";
+                            debugLog.innerText = "";
+
+                            try {
+                                const response = await fetch('/ocr', {
+                                    method: 'POST',
+                                    headers: { 'Content-Type': 'application/json' },
+                                    body: JSON.stringify({ image: base64Image })
+                                });
+                                const data = await response.json();
+
+                                debugLog.innerText = JSON.stringify(data, null, 2);
+
+                                if (data.error) {
+                                    status.innerText = "❌ エラー: " + data.error;
+                                } else if (Array.isArray(data.results) && data.results.length) {
+                                    status.innerText = `✅ 抽出完了 (${data.results.length} 列)`;
+                                    data.results.forEach(res => {
+                                        const card = document.createElement('div');
+                                        card.className = 'column-card';
+                                        const numbersHtml = (res.numbers || []).map(n => `<div>${n}</div>`).join('');
+                                        card.innerHTML = `
+                                            <div class="column-title">第${res.column}列</div>
+                                            ${numbersHtml}
+                                            <div class="total-box">合計: ${res.total ?? ''}</div>
+                                        `;
+                                        output.appendChild(card);
+                                    });
+                                } else {
+                                    status.innerText = '⚠️ 結果が空です';
+                                }
+                            } catch (err) {
+                                status.innerText = "❌ 通信エラー";
+                                debugLog.innerText = err.toString();
+                                debugLog.style.display = 'block';
+                            }
+                        }
+                    </script>
+                </body>
+                </html>
