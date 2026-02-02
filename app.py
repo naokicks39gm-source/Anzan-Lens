@@ -3,6 +3,7 @@ import json
 import io
 import os
 import re
+import time
 from flask import Flask, request, jsonify, render_template
 from google import genai
 from google.genai import types
@@ -281,6 +282,7 @@ def index():
 @app.route('/ocr', methods=['POST'])
 def perform_ocr():
     try:
+        time_start = time.time()
         if not API_KEY:
             return jsonify({"error": "GEMINI_API_KEY is not set"}), 500
 
@@ -333,6 +335,7 @@ def perform_ocr():
                     break
             parsed["sections"] = sections
 
+        parsed["processing_time_ms"] = int((time.time() - time_start) * 1000)
         return jsonify(parsed)
 
     except Exception as e:

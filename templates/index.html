@@ -312,7 +312,12 @@
                 }
 
                 renderSections(data.sections || []);
-                statusEl.innerText = "✅ 抽出完了";
+                if (typeof data.processing_time_ms === 'number') {
+                    const sec = (data.processing_time_ms / 1000).toFixed(2);
+                    statusEl.innerText = `✅ 抽出完了（解析時間: ${sec} 秒）`;
+                } else {
+                    statusEl.innerText = "✅ 抽出完了";
+                }
             } catch (err) {
                 statusEl.innerText = "❌ 通信エラーが発生しました。";
                 console.error(err);
