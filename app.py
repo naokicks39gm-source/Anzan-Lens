@@ -339,10 +339,12 @@ def transform_image(image_bytes: bytes, transform: str) -> bytes:
     except Exception:
         return image_bytes
 
-    if transform == "rot180":
+    if transform == "rot90":
+        img = img.rotate(90, expand=True)
+    elif transform == "rot180":
         img = img.rotate(180, expand=True)
-    elif transform == "flip_lr":
-        img = img.transpose(Image.Transpose.FLIP_LEFT_RIGHT)
+    elif transform == "rot270":
+        img = img.rotate(270, expand=True)
     else:
         return image_bytes
 
@@ -601,21 +603,27 @@ def perform_ocr():
 
         if mode == "speed":
             parsed = run_speed_pipeline(image_bytes, mime_type, allow_accuracy_fallback=False)
-            if parsed_completeness_score(parsed) < 20:
+            base_score = parsed_completeness_score(parsed)
+            elapsed_ms = int((time.time() - time_start) * 1000)
+
+            # Keep speed mode bounded: only try rotations when the first result is clearly broken
+            # and the request is still within a small time budget.
+            if base_score < 10 and elapsed_ms < 15000:
                 candidates = [
+                    run_speed_pipeline(transform_image(image_bytes, "rot90"), mime_type, allow_accuracy_fallback=False),
+                    run_speed_pipeline(transform_image(image_bytes, "rot270"), mime_type, allow_accuracy_fallback=False),
                     run_speed_pipeline(transform_image(image_bytes, "rot180"), mime_type, allow_accuracy_fallback=False),
-                    run_speed_pipeline(transform_image(image_bytes, "flip_lr"), mime_type, allow_accuracy_fallback=False),
                 ]
                 best = parsed
-                best_score = parsed_completeness_score(parsed)
+                best_score = base_score
                 for cand in candidates:
                     score = parsed_completeness_score(cand)
                     if score > best_score:
                         best = cand
                         best_score = score
+                    if best_score >= 20:
+                        break
                 parsed = best
-            if parsed_completeness_score(parsed) < 20:
-                parsed = run_speed_pipeline(image_bytes, mime_type, allow_accuracy_fallback=True)
             if not isinstance(parsed, dict):
                 return jsonify(build_fallback_payload())
         else:
