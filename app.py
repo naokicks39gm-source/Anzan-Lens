@@ -1,15 +1,13 @@
 import base64
 import json
+import io
 import os
 import re
-import time
-import io
 from flask import Flask, request, jsonify, render_template
 from google import genai
 from google.genai import types
 from dotenv import load_dotenv
 from PIL import Image
-import pytesseract
 
 load_dotenv()
 
@@ -48,36 +46,30 @@ def build_prompt(spatial_focus: bool) -> str:
     spatial_rules = ""
     if spatial_focus:
         spatial_rules = """
-        読み取りルール（高速版）:
-        - 画像は一度だけ全体を見て処理する
-        - 問題番号（1,2,3…）をアンカーとして認識する
-        - 番号の近くにある「式」と「手書き解答」を1セットとして扱う
-        - 迷った場合は「番号に最も近い数字」を student_answer とする
-        - 推測後の再検討は禁止
-
-        レイアウトの最低限ルール:
-        - かけ算は左右2列構成
-        - 左列：1〜3番 / 右列：4〜6番
-        - 右列（4〜6番）も必ず処理する
-        - 左右の列を混在させない
+        空間認識ルール:
+        - 画像全体をスキャンし、見出し（みとりざん、かけざん、わりざん）の位置をまず特定せよ
+        - かけざんセクションにおいて、左側(1-3番)だけでなく、その右側に配置されている(4-6番)を絶対に見落とすな
+        - 画像右側のブロックも必ずスキャンし、見落としを防げ
+        - 『4 234×312=』のような、問題番号、式、手書き解答のセットを漏れなく抽出せよ
+        - JSONレスポンスには、読み取ったすべての問題番号を含めること
         """
 
     return f"""
-        あなたは高速・実用特化の手書き算数OCR＋採点AIです。
-        対象: 小学生の暗算プリント画像（みとりざん/かけざん/わりざんが混在）。
+        あなたは日本の学習プリント画像を解析するOCRアシスタントです。
+        画像内の各セクション（見出し）を特定し、セクションごとに最適な抽出ルールを適用してください。
+
+        対象例: 「みとりざん（表）」「かけざん（横式）」「わりざん（横式）」が同一画像に混在します。
 
         抽出ルール:
         - みとりざん: 15列の表として列ごとの7つの数値と合計を抽出
         - かけざん/わりざん: 問題番号、式、手書きの解答をセットで抽出
-        - かけざん/わりざんは「正解値」を即計算し、手書き解答と一致するか判定する
-        - 各問題に answer_confidence（0.0〜1.0）と needs_review（true/false）を付与する
+        - 読み取りにくい手書き数字（赤丸内など）は周囲の文脈から慎重に推論
         {spatial_rules}
 
         出力は以下のJSONのみ。説明文やMarkdownは禁止。
 
         {{
           "format_type": "multi",
-          "processing_time_ms": 1850,
           "sections": [
             {{
               "title": "みとりざん",
@@ -91,7 +83,7 @@ def build_prompt(spatial_focus: bool) -> str:
               "title": "かけざん",
               "type": "list",
               "items": [
-                {{"number": "1", "expression": "12×3=", "answer": "36", "correct_answer": "36", "is_correct": true, "mark": "○", "mark_position": "near_student_answer_top_right", "answer_confidence": 0.9, "needs_review": false}},
+                {{"number": "1", "expression": "12×3=", "answer": "36"}},
                 ...
               ]
             }},
@@ -99,7 +91,7 @@ def build_prompt(spatial_focus: bool) -> str:
               "title": "わりざん",
               "type": "list",
               "items": [
-                {{"number": "1", "expression": "12÷3=", "answer": "4", "correct_answer": "4", "is_correct": true, "mark": "○", "mark_position": "near_student_answer_top_right", "answer_confidence": 0.9, "needs_review": false}},
+                {{"number": "1", "expression": "12÷3=", "answer": "4"}},
                 ...
               ]
             }}
@@ -108,17 +100,157 @@ def build_prompt(spatial_focus: bool) -> str:
 
         追加ルール:
         - 数値が不明な場合は0または空文字にする
-        - すべてのセクション（みとりざん、かけざん、わりざん）を漏れなく含める
-        - is_correct に応じて mark を必ず付与（true→○, false→×）
-        - mark_position は student_answer の近くでよい（例: \"near_student_answer_top_right\"）
-        - answer_confidence は必ず数値で返す
-        - needs_review は以下のいずれかで true:
-          * answer_confidence < 0.75
-          * is_correct が false かつ confidence が低い
-          * 桁数が式の結果と不自然にズレている
-        - 処理時間を processing_time_ms にミリ秒で必ず出力
         - 必ずJSONのみを返す
         """
+
+
+def build_mitorizan_prompt() -> str:
+    return """
+        あなたは「みとりざん」表の転記専用OCRです。
+        推測せず、画像に見える数字だけを列ごとに配列で返してください。
+        各列は row_count を明示してください。
+        第1〜4列と第5〜8列で行数が異なる場合でも、見えた行数をそのまま返してください。
+        合計 total は numbers の合計で算出してください。
+
+        出力はJSONのみ:
+        {
+          "format_type": "multi",
+          "sections": [
+            {
+              "title": "みとりざん",
+              "type": "table",
+              "results": [
+                {"column": 1, "numbers": [85, 77, 59, 23, 74, 80, 97], "row_count": 7, "total": 495}
+              ]
+            }
+          ]
+        }
+    """
+
+
+def generate_json_response(prompt: str, image_bytes: bytes, mime_type: str):
+    try:
+        response = client.models.generate_content(
+            model=MODEL_ID,
+            contents=[
+                prompt,
+                types.Part.from_bytes(data=image_bytes, mime_type=mime_type),
+            ],
+            config=types.GenerateContentConfig(
+                response_mime_type="application/json",
+            ),
+        )
+    except Exception:
+        response = client.models.generate_content(
+            model=MODEL_ID,
+            contents=[
+                prompt,
+                types.Part.from_bytes(data=image_bytes, mime_type=mime_type),
+            ],
+        )
+    return parse_json_from_text(response.text)
+
+
+def get_mitorizan_section(parsed):
+    if not isinstance(parsed, dict):
+        return None
+    for section in parsed.get("sections", []):
+        title = str(section.get("title", ""))
+        if "みとり" in title and section.get("type") == "table":
+            return section
+    return None
+
+
+def mitorizan_score(section):
+    if not section:
+        return -1
+    results = section.get("results", [])
+    if not isinstance(results, list):
+        return -1
+    col_map = {}
+    for r in results:
+        try:
+            c = int(r.get("column"))
+        except Exception:
+            continue
+        nums = r.get("numbers", [])
+        if not isinstance(nums, list):
+            nums = []
+        col_map[c] = len(nums)
+
+    score = 0
+    # Prefer exact row counts: col1-4=7, col5-8=8
+    for c in range(1, 5):
+        n = col_map.get(c, 0)
+        score += max(0, 12 - abs(n - 7) * 4)
+    for c in range(5, 9):
+        n = col_map.get(c, 0)
+        score += max(0, 14 - abs(n - 8) * 4)
+    # Soft bonus for populated 1..8 columns
+    score += sum(1 for c in range(1, 9) if col_map.get(c, 0) > 0)
+    return score
+
+
+def kakezan_score(section):
+    if not section or section.get("type") != "list":
+        return -1
+    items = section.get("items", [])
+    if not isinstance(items, list):
+        return -1
+    score = len(items)
+    for item in items:
+        expr = str(item.get("expression", ""))
+        expr = expr.replace("×", "*").replace("x", "*").replace("X", "*")
+        parts = [p for p in expr.split("*") if p]
+        if len(parts) >= 2 and len(parts[0].strip()) == 3 and len(parts[1].strip()) == 3:
+            score += 10
+    return score
+
+
+def best_mitorizan_from_variants(image_bytes: bytes, mime_type: str):
+    prompt = build_mitorizan_prompt()
+    img = Image.open(io.BytesIO(image_bytes))
+    variants = [
+        ("orig", img),
+        ("rot90", img.rotate(90, expand=True)),
+        ("rot270", img.rotate(270, expand=True)),
+    ]
+    best_section = None
+    best_score = -1
+    for _, variant in variants:
+        buf = io.BytesIO()
+        variant.save(buf, format="PNG")
+        parsed = generate_json_response(prompt, buf.getvalue(), "image/png")
+        section = get_mitorizan_section(parsed)
+        score = mitorizan_score(section)
+        if score > best_score:
+            best_score = score
+            best_section = section
+    return best_section
+
+
+def best_kakezan_from_variants(image_bytes: bytes):
+    prompt = build_prompt(spatial_focus=True) + "\nかけざん・わりざんを優先して抽出せよ。"
+    img = Image.open(io.BytesIO(image_bytes))
+    w, h = img.size
+    variants = [
+        ("right45", img.crop((int(w * 0.45), int(h * 0.05), int(w * 0.98), int(h * 0.95))),
+        ),
+        ("right50", img.crop((int(w * 0.50), int(h * 0.05), int(w * 0.98), int(h * 0.95))),
+        ),
+    ]
+    best_section = None
+    best_score = -1
+    for _, variant in variants:
+        buf = io.BytesIO()
+        variant.save(buf, format="PNG")
+        parsed = generate_json_response(prompt, buf.getvalue(), "image/png")
+        section = get_section(parsed, "かけざん") if isinstance(parsed, dict) else None
+        score = kakezan_score(section)
+        if score > best_score:
+            best_score = score
+            best_section = section
+    return best_section
 
 
 def get_section(parsed, title_hint: str):
@@ -141,181 +273,6 @@ def needs_kakezan_rescan(parsed) -> bool:
     return not required.issubset(numbers)
 
 
-def parse_number(value):
-    if value is None:
-        return None
-    text = str(value).strip()
-    if not text:
-        return None
-    text = text.replace(",", "")
-    try:
-        if "." in text:
-            return float(text)
-        return int(text)
-    except ValueError:
-        return None
-
-
-def count_digits(value):
-    if value is None:
-        return 0
-    text = str(value).strip()
-    if not text:
-        return 0
-    text = text.replace("-", "").replace(".", "")
-    return len(text)
-
-
-def extract_ocr_tokens(image_bytes):
-    try:
-        image = Image.open(io.BytesIO(image_bytes))
-    except Exception:
-        return []
-
-    config = "--psm 6 -c tessedit_char_whitelist=0123456789"
-    data = pytesseract.image_to_data(image, config=config, output_type=pytesseract.Output.DICT)
-    tokens = []
-    for text, conf in zip(data.get("text", []), data.get("conf", [])):
-        if text is None:
-            continue
-        cleaned = re.sub(r"\\D", "", str(text))
-        if not cleaned:
-            continue
-        try:
-            conf_val = float(conf)
-        except Exception:
-            continue
-        if conf_val < 0:
-            continue
-        tokens.append({"text": cleaned, "conf": conf_val / 100.0})
-    return tokens
-
-
-def compute_correct_answer(expression: str):
-    if not expression:
-        return None
-    expr = str(expression)
-    expr = expr.replace("×", "*").replace("x", "*").replace("X", "*")
-    expr = expr.replace("÷", "/")
-    expr = expr.replace("＝", "=").replace(" ", "")
-    expr = expr.rstrip("=")
-
-    match = re.findall(r"-?\d+(?:\.\d+)?", expr)
-    if len(match) < 2:
-        return None
-
-    a = parse_number(match[0])
-    b = parse_number(match[1])
-    if a is None or b is None:
-        return None
-
-    if "*" in expr:
-        return a * b
-    if "/" in expr:
-        try:
-            return a / b
-        except ZeroDivisionError:
-            return None
-    return None
-
-
-def enrich_scoring(parsed, ocr_tokens):
-    sections = parsed.get("sections", [])
-    token_map = {}
-    for token in ocr_tokens or []:
-        text = token.get("text")
-        conf = token.get("conf")
-        if not text or not isinstance(conf, (int, float)):
-            continue
-        token_map[text] = max(conf, token_map.get(text, 0.0))
-    for section in sections:
-        if section.get("type") == "table":
-            results = section.get("results", [])
-            if not isinstance(results, list):
-                continue
-            for result in results:
-                numbers = result.get("numbers", [])
-                total = result.get("total")
-                correct_total = None
-                if isinstance(numbers, list) and numbers:
-                    try:
-                        correct_total = sum([int(parse_number(n) or 0) for n in numbers])
-                    except Exception:
-                        correct_total = None
-                if correct_total is not None:
-                    result["correct_answer"] = str(correct_total)
-                    result["student_answer"] = str(total) if total is not None else ""
-                    total_num = parse_number(total)
-                    result["is_correct"] = (total_num == correct_total)
-                else:
-                    result.setdefault("is_correct", False)
-
-                total_key = re.sub(r"\\D", "", str(total or ""))
-                confidence = token_map.get(total_key, 0.0) if total_key else 0.0
-                result["answer_confidence"] = max(0.0, min(1.0, float(confidence)))
-
-                if result.get("is_correct") is True:
-                    result["mark"] = "○"
-                else:
-                    result["mark"] = "×"
-                result.setdefault("mark_position", "near_student_answer_top_right")
-
-                answer_digits = count_digits(total)
-                correct_digits = count_digits(correct_total)
-                digits_mismatch = abs(answer_digits - correct_digits) >= 2 and correct_digits > 0
-                low_confidence = result["answer_confidence"] < 0.75
-                incorrect_low = result.get("is_correct") is False and result["answer_confidence"] < 0.8
-                result["needs_review"] = bool(low_confidence or incorrect_low or digits_mismatch)
-            continue
-
-        if section.get("type") != "list":
-            continue
-        items = section.get("items", [])
-        if not isinstance(items, list):
-            continue
-        for item in items:
-            expression = item.get("expression")
-            answer = item.get("answer")
-            correct_answer = item.get("correct_answer")
-            confidence = item.get("answer_confidence")
-            if correct_answer is None:
-                correct_answer = compute_correct_answer(expression)
-                if correct_answer is not None:
-                    item["correct_answer"] = str(correct_answer)
-            user_answer = parse_number(answer)
-            correct_answer_num = parse_number(correct_answer)
-            if correct_answer_num is not None and user_answer is not None:
-                if isinstance(correct_answer_num, float) or isinstance(user_answer, float):
-                    item["is_correct"] = abs(float(correct_answer_num) - float(user_answer)) < 1e-9
-                else:
-                    item["is_correct"] = int(correct_answer_num) == int(user_answer)
-            else:
-                item.setdefault("is_correct", False)
-
-            if not isinstance(confidence, (int, float)):
-                answer_key = re.sub(r"\\D", "", str(answer or ""))
-                if answer_key and answer_key in token_map:
-                    confidence = token_map[answer_key]
-                else:
-                    confidence = 0.0
-            confidence = max(0.0, min(1.0, float(confidence)))
-            item["answer_confidence"] = confidence
-
-            if item.get("is_correct") is True:
-                item["mark"] = "○"
-            else:
-                item["mark"] = "×"
-            item.setdefault("mark_position", "near_student_answer_top_right")
-
-            answer_digits = count_digits(answer)
-            correct_digits = count_digits(correct_answer_num)
-            digits_mismatch = abs(answer_digits - correct_digits) >= 2 and correct_digits > 0
-            low_confidence = confidence < 0.75
-            incorrect_low = item.get("is_correct") is False and confidence < 0.8
-            item["needs_review"] = bool(low_confidence or incorrect_low or digits_mismatch)
-    return parsed
-
-
 @app.route('/')
 def index():
     return render_template('index.html')
@@ -324,7 +281,6 @@ def index():
 @app.route('/ocr', methods=['POST'])
 def perform_ocr():
     try:
-        time_start = time.time()
         if not API_KEY:
             return jsonify({"error": "GEMINI_API_KEY is not set"}), 500
 
@@ -334,38 +290,8 @@ def perform_ocr():
         mime_type = header.split(';')[0].split(':')[1] if ':' in header else "image/jpeg"
         image_bytes = base64.b64decode(encoded)
 
-        mock_response = os.getenv("ANZAN_MOCK_RESPONSE")
-        if mock_response:
-            parsed = json.loads(mock_response)
-            if not isinstance(parsed, dict):
-                return jsonify(build_fallback_payload())
-            parsed["format_type"] = "multi"
-            parsed = enrich_scoring(parsed, [])
-            return jsonify(parsed)
-
         prompt = build_prompt(spatial_focus=True)
-
-        try:
-            response = client.models.generate_content(
-                model=MODEL_ID,
-                contents=[
-                    prompt,
-                    types.Part.from_bytes(data=image_bytes, mime_type=mime_type),
-                ],
-                config=types.GenerateContentConfig(
-                    response_mime_type="application/json",
-                ),
-            )
-        except Exception:
-            response = client.models.generate_content(
-                model=MODEL_ID,
-                contents=[
-                    prompt,
-                    types.Part.from_bytes(data=image_bytes, mime_type=mime_type),
-                ],
-            )
-
-        parsed = parse_json_from_text(response.text)
+        parsed = generate_json_response(prompt, image_bytes, mime_type)
         if not isinstance(parsed, dict):
             return jsonify(build_fallback_payload())
 
@@ -374,10 +300,39 @@ def perform_ocr():
         if "sections" not in parsed or not isinstance(parsed["sections"], list):
             return jsonify(build_fallback_payload())
 
-        ocr_tokens = extract_ocr_tokens(image_bytes)
-        parsed = enrich_scoring(parsed, ocr_tokens)
-        processing_time_ms = int((time.time() - time_start) * 1000)
-        parsed["processing_time_ms"] = processing_time_ms
+        if needs_kakezan_rescan(parsed):
+            retry_prompt = build_prompt(spatial_focus=True) + "\n再走査: かけざんの4-6番を絶対に取りこぼさず補完してJSONのみ返せ。"
+            retry_parsed = generate_json_response(retry_prompt, image_bytes, mime_type)
+            if isinstance(retry_parsed, dict) and isinstance(retry_parsed.get("sections"), list):
+                parsed = retry_parsed
+                if parsed.get("format_type") != "multi":
+                    parsed["format_type"] = "multi"
+
+        best_mitori = best_mitorizan_from_variants(image_bytes, mime_type)
+        if best_mitori is not None:
+            sections = parsed.get("sections", [])
+            replaced = False
+            for i, s in enumerate(sections):
+                title = str(s.get("title", ""))
+                if "みとり" in title and s.get("type") == "table":
+                    sections[i] = best_mitori
+                    replaced = True
+                    break
+            if not replaced:
+                sections.append(best_mitori)
+            parsed["sections"] = sections
+
+        best_kake = best_kakezan_from_variants(image_bytes)
+        if best_kake is not None:
+            sections = parsed.get("sections", [])
+            for i, s in enumerate(sections):
+                title = str(s.get("title", ""))
+                if "かけざん" in title and s.get("type") == "list":
+                    if kakezan_score(best_kake) > kakezan_score(s):
+                        sections[i] = best_kake
+                    break
+            parsed["sections"] = sections
+
         return jsonify(parsed)
 
     except Exception as e:

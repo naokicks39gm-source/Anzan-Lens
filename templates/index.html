@@ -62,19 +62,6 @@
             padding: 22px;
         }
 
-        .score {
-            margin: 12px 0 20px;
-            display: inline-flex;
-            align-items: center;
-            gap: 8px;
-            padding: 8px 14px;
-            border-radius: 999px;
-            background: rgba(15, 118, 110, 0.1);
-            color: var(--accent);
-            font-weight: 600;
-            font-size: 14px;
-        }
-
         #drop-area {
             border: 2px dashed rgba(15, 118, 110, 0.4);
             border-radius: 16px;
@@ -178,16 +165,6 @@
             color: var(--muted);
         }
 
-        .answer-wrong {
-            color: #d70035;
-            font-weight: 600;
-        }
-
-        .answer-correct {
-            color: #0f766e;
-            font-weight: 600;
-        }
-
         .hidden { display: none; }
 
         @media (max-width: 768px) {
@@ -203,8 +180,6 @@
             <p class="subtitle">複合プリントの構造を自動判別して抽出します。</p>
         </header>
 
-        <div id="score" class="score hidden">正解数: 0 / 0</div>
-
         <div class="card">
             <div id="drop-area">
                 <p>ここに画像をペースト (Cmd+V)</p>
@@ -214,7 +189,6 @@
             <div id="status">準備完了。画像を貼り付けてください。</div>
         </div>
 
-        <div id="result"></div>
         <div id="sections"></div>
     </div>
 
@@ -222,107 +196,30 @@
         const statusEl = document.getElementById('status');
         const previewEl = document.getElementById('preview');
         const sectionsEl = document.getElementById('sections');
-        const scoreEl = document.getElementById('score');
-
-        function scoreOcrResults(ocrResults, correctAnswers, options = {}) {
-            const confidences = Array.isArray(options.confidences) ? options.confidences : [];
-            const total = Math.max(ocrResults.length, correctAnswers.length);
-            const results = [];
-            const needsReview = [];
-            let correct = 0;
-
-            for (let i = 0; i < total; i++) {
-                const ocrValue = ocrResults[i] ?? null;
-                const correctValue = correctAnswers[i] ?? null;
-                const isCorrect = ocrValue === correctValue;
-                let note = "";
-
-                const isFiveEightMismatch = (
-                    (ocrValue === 5 && correctValue === 8) ||
-                    (ocrValue === 8 && correctValue === 5)
-                );
-                const confidence = confidences[i];
-                const lowConfidence = typeof confidence === "number" && confidence < 0.6;
-
-                if (isFiveEightMismatch) {
-                    note = "5↔8 ambiguity";
-                    needsReview.push(i + 1);
-                } else if (lowConfidence) {
-                    note = "low_confidence";
-                    needsReview.push(i + 1);
-                }
-
-                if (isCorrect) {
-                    correct += 1;
-                }
-
-                results.push({
-                    questionIndex: i + 1,
-                    ocrValue,
-                    correctValue,
-                    isCorrect,
-                    note: note || undefined
-                });
-            }
-
-            return {
-                results,
-                summary: {
-                    total,
-                    correct,
-                    incorrect: total - correct,
-                    needsReview
-                }
-            };
-        }
-
-        window.scoreOcrResults = scoreOcrResults;
-
-        function updateScore(sections) {
-            let total = 0;
-            let correct = 0;
-
-            sections.forEach(section => {
-                if (section.type !== 'list') return;
-                const items = section.items || [];
-                items.forEach(item => {
-                    total += 1;
-                    if (item.is_correct === true) {
-                        correct += 1;
-                    }
-                });
-            });
-
-            if (total === 0) {
-                scoreEl.classList.add('hidden');
-                scoreEl.textContent = '正解数: 0 / 0';
-                return;
-            }
-
-            scoreEl.textContent = `正解数: ${correct} / ${total}`;
-            scoreEl.classList.remove('hidden');
-        }
 
         function renderTableSection(section) {
             const results = section.results || [];
             const headerCells = ["<th>No.</th>", ...results.map(r => `<th>第${r.column}列</th>`)].join('');
 
+            let maxRows = 0;
+            results.forEach(r => {
+                const len = typeof r.row_count === 'number'
+                    ? r.row_count
+                    : (Array.isArray(r.numbers) ? r.numbers.length : 0);
+                if (len > maxRows) maxRows = len;
+            });
+
             let bodyHtml = "";
-            for (let i = 0; i < 7; i++) {
-                bodyHtml += `<tr><td>${i + 1}</td>` + results.map(r => `<td>${r.numbers?.[i] ?? '0'}</td>`).join('') + `</tr>`;
+            for (let i = 0; i < maxRows; i++) {
+                bodyHtml += `<tr><td>${i + 1}</td>` + results.map(r => {
+                    const len = typeof r.row_count === 'number'
+                        ? r.row_count
+                        : (Array.isArray(r.numbers) ? r.numbers.length : 0);
+                    if (i >= len) return `<td></td>`;
+                    return `<td>${r.numbers?.[i] ?? '0'}</td>`;
+                }).join('') + `</tr>`;
             }
-            bodyHtml += `<tr class="total-row"><td>合計</td>` + results.map(r => {
-                const total = r.student_answer ?? r.total ?? '0';
-                const correct = r.correct_answer ?? '';
-                const isCorrect = r.is_correct === true;
-                const mark = r.mark ?? (isCorrect ? '○' : '×');
-                const confidence = typeof r.answer_confidence === "number"
-                    ? (r.answer_confidence * 100).toFixed(0) + "%"
-                    : "";
-                const correction = !isCorrect && correct !== '' ? ` 正:${correct}` : "";
-                const confLine = confidence ? `<div class="qa-a">信頼度: ${confidence}</div>` : "";
-                return `<td>${total} ${mark}${correction}${confLine}</td>`;
-            }).join('') + `</tr>`;
+            bodyHtml += `<tr class="total-row"><td>合計</td>` + results.map(r => `<td>${r.total ?? '0'}</td>`).join('') + `</tr>`;
 
             return `
                 <div class="section">
@@ -342,21 +239,11 @@
             const cards = items.map((item, idx) => {
                 const num = item.number ? `${item.number}. ` : `${idx + 1}. `;
                 const expr = item.expression || "";
-                const answer = item.answer ?? "";
-                const correctAnswer = item.correct_answer ?? "";
-                const confidence = typeof item.answer_confidence === "number"
-                    ? (item.answer_confidence * 100).toFixed(0)
-                    : null;
-                const isCorrect = item.is_correct === true;
-                const answerClass = isCorrect ? "answer-correct" : "answer-wrong";
-                const correction = !isCorrect && correctAnswer !== "" ? ` <span class="answer-correct">正解: ${correctAnswer}</span>` : "";
-                const confidenceBadge = confidence !== null
-                    ? ` <span class="qa-a">信頼度: ${confidence}%</span>`
-                    : "";
+                const answer = item.answer || "";
                 return `
                     <div class="qa-item">
                         <div class="qa-q">${num}${expr}</div>
-                        <div class="qa-a ${answerClass}">解答: ${answer}${correction}${confidenceBadge}</div>
+                        <div class="qa-a">解答: ${answer}</div>
                     </div>
                 `;
             }).join('');
@@ -372,7 +259,6 @@
         function renderSections(sections) {
             if (!Array.isArray(sections) || sections.length === 0) {
                 sectionsEl.innerHTML = '';
-                updateScore([]);
                 return;
             }
 
@@ -383,7 +269,6 @@
             }).join('');
 
             sectionsEl.innerHTML = html;
-            updateScore(sections);
         }
 
         document.onpaste = function(event) {
@@ -407,7 +292,6 @@
         async function sendToGemini(base64Image) {
             statusEl.innerText = "⏳ 構造を解析中...";
             sectionsEl.innerHTML = '';
-            updateScore([]);
 
             try {
                 const response = await fetch('/ocr', {
@@ -416,27 +300,6 @@
                     body: JSON.stringify({ image: base64Image })
                 });
                 const data = await response.json();
-
-                // ===== 解析時間表示（最上部） =====
-                const resultContainer = document.getElementById("result");
-                if (resultContainer && data.processing_time_ms !== undefined) {
-                    // 既存結果を一旦クリア
-                    resultContainer.innerHTML = "";
-
-                    const timeDiv = document.createElement("div");
-                    timeDiv.className =
-                        "mb-4 p-3 rounded bg-gray-100 border text-gray-800 font-semibold";
-
-                    const sec = (data.processing_time_ms / 1000).toFixed(2);
-
-                    timeDiv.innerHTML = `
-                        ⏱ 解析時間：
-                        <span class="text-blue-600 text-lg">${sec} 秒</span>
-                    `;
-
-                    resultContainer.appendChild(timeDiv);
-                }
-                // ===== ここまで =====
 
                 if (data.error) {
                     statusEl.innerText = "❌ エラー: " + data.error;
