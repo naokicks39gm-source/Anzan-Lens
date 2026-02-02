@@ -254,6 +254,36 @@ def best_kakezan_from_variants(image_bytes: bytes):
     return best_section
 
 
+def enrich_mitorizan_answers(parsed):
+    if not isinstance(parsed, dict):
+        return parsed
+    sections = parsed.get("sections", [])
+    for section in sections:
+        if section.get("type") != "table":
+            continue
+        title = str(section.get("title", ""))
+        if "みとり" not in title:
+            continue
+        results = section.get("results", [])
+        if not isinstance(results, list):
+            continue
+        for result in results:
+            numbers = result.get("numbers", [])
+            if not isinstance(numbers, list):
+                numbers = []
+            correct = 0
+            for n in numbers:
+                try:
+                    correct += int(str(n).replace(",", ""))
+                except Exception:
+                    continue
+            result["correct_answer"] = str(correct)
+            if "student_answer" not in result:
+                student = result.get("total", "")
+                result["student_answer"] = str(student) if student is not None else ""
+    return parsed
+
+
 def get_section(parsed, title_hint: str):
     for section in parsed.get("sections", []):
         title = str(section.get("title", ""))
@@ -335,6 +365,7 @@ def perform_ocr():
                     break
             parsed["sections"] = sections
 
+        parsed = enrich_mitorizan_answers(parsed)
         parsed["processing_time_ms"] = int((time.time() - time_start) * 1000)
         return jsonify(parsed)
 

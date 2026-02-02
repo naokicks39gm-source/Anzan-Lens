@@ -197,6 +197,28 @@
         const previewEl = document.getElementById('preview');
         const sectionsEl = document.getElementById('sections');
 
+        function computeCorrectAnswer(expression) {
+            if (!expression) return "";
+            const normalized = String(expression)
+                .replace(/×/g, "*")
+                .replace(/[xX]/g, "*")
+                .replace(/÷/g, "/")
+                .replace(/＝/g, "=")
+                .replace(/\s+/g, "")
+                .replace(/=$/, "");
+            const nums = normalized.match(/-?\d+(?:\.\d+)?/g);
+            if (!nums || nums.length < 2) return "";
+            const a = Number(nums[0]);
+            const b = Number(nums[1]);
+            if (!Number.isFinite(a) || !Number.isFinite(b)) return "";
+            if (normalized.includes("*")) return String(a * b);
+            if (normalized.includes("/")) {
+                if (b === 0) return "";
+                return String(a / b);
+            }
+            return "";
+        }
+
         function renderTableSection(section) {
             const results = section.results || [];
             const headerCells = ["<th>No.</th>", ...results.map(r => `<th>第${r.column}列</th>`)].join('');
@@ -219,7 +241,14 @@
                     return `<td>${r.numbers?.[i] ?? '0'}</td>`;
                 }).join('') + `</tr>`;
             }
-            bodyHtml += `<tr class="total-row"><td>合計</td>` + results.map(r => `<td>${r.total ?? '0'}</td>`).join('') + `</tr>`;
+            bodyHtml += `<tr class="total-row"><td>合計</td>` + results.map(r => {
+                const student = r.student_answer ?? r.total ?? '0';
+                const correct = r.correct_answer ?? '';
+                if (correct !== '') {
+                    return `<td>生徒: ${student}<br>正解: ${correct}</td>`;
+                }
+                return `<td>${student}</td>`;
+            }).join('') + `</tr>`;
 
             return `
                 <div class="section">
@@ -240,10 +269,11 @@
                 const num = item.number ? `${item.number}. ` : `${idx + 1}. `;
                 const expr = item.expression || "";
                 const answer = item.answer || "";
+                const correctAnswer = item.correct_answer || computeCorrectAnswer(expr);
                 return `
                     <div class="qa-item">
                         <div class="qa-q">${num}${expr}</div>
-                        <div class="qa-a">解答: ${answer}</div>
+                        <div class="qa-a">解答: ${answer} / 正解: ${correctAnswer}</div>
                     </div>
                 `;
             }).join('');
