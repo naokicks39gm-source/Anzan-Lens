@@ -1,4 +1,5 @@
 import base64
+import hashlib
 import json
 import io
 import os
@@ -23,6 +24,10 @@ client = genai.Client(
     http_options=types.HttpOptions(apiVersion="v1"),
 )
 
+# In-memory cache for repeated OCR on the same image+mode.
+OCR_CACHE = {}
+CACHE_MAX_ITEMS = 24
+
 
 def parse_json_from_text(text_response: str):
     text_response = (text_response or "").strip()
@@ -41,6 +46,27 @@ def build_fallback_payload():
         "format_type": "multi",
         "sections": []
     }
+
+
+def make_cache_key(image_bytes: bytes, mode: str) -> str:
+    digest = hashlib.sha256(image_bytes).hexdigest()
+    return f"{mode}:{digest}"
+
+
+def get_cached_payload(cache_key: str):
+    payload = OCR_CACHE.get(cache_key)
+    if not isinstance(payload, dict):
+        return None
+    # Return a copy so response mutations do not overwrite cache.
+    return json.loads(json.dumps(payload))
+
+
+def set_cached_payload(cache_key: str, payload: dict):
+    if len(OCR_CACHE) >= CACHE_MAX_ITEMS:
+        # Drop oldest inserted key to cap memory.
+        first_key = next(iter(OCR_CACHE))
+        OCR_CACHE.pop(first_key, None)
+    OCR_CACHE[cache_key] = json.loads(json.dumps(payload))
 
 
 def build_prompt_accuracy() -> str:
@@ -313,6 +339,13 @@ def perform_ocr():
         header, encoded = data_url.split(',', 1)
         mime_type = header.split(';')[0].split(':')[1] if ':' in header else "image/jpeg"
         image_bytes = base64.b64decode(encoded)
+        cache_key = make_cache_key(image_bytes, mode)
+        cached = get_cached_payload(cache_key)
+        if cached is not None:
+            cached["mode"] = mode
+            cached["cached"] = True
+            cached["processing_time_ms"] = int((time.time() - time_start) * 1000)
+            return jsonify(cached)
 
         if mode == "speed":
             prompt = build_prompt_speed()
@@ -330,7 +363,9 @@ def perform_ocr():
             return jsonify(build_fallback_payload())
 
         parsed = enrich_mitorizan_answers(parsed)
+        set_cached_payload(cache_key, parsed)
         parsed["mode"] = mode
+        parsed["cached"] = False
         parsed["processing_time_ms"] = int((time.time() - time_start) * 1000)
         return jsonify(parsed)
 
