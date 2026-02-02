@@ -43,7 +43,7 @@ def build_fallback_payload():
     }
 
 
-def build_prompt(spatial_focus: bool) -> str:
+def build_prompt_accuracy() -> str:
     return """
         OCR抽出。JSONのみ。
         - みとりざん: 列1-4は原則7個、列5-8は原則8個を優先し、可変長で numbers を返す。
@@ -61,6 +61,17 @@ def build_prompt(spatial_focus: bool) -> str:
             {"title":"わりざん","type":"list","items":[{"number":"1","expression":"27864÷448=","answer":"63"}]}
           ]
         }
+    """
+
+
+def build_prompt_speed() -> str:
+    return """
+        OCRを高速に実行。JSONのみ。
+        - みとりざん: 列1-4は7個、列5-8は8個を優先。resultsは {column, numbers, total}。
+        - かけざん: 1-6を返す。左右列(1-3,4-6)を混在させない。式は3桁×3桁を優先。
+        - わりざん: 1-3を返す。
+        JSON:
+        {"format_type":"multi","sections":[{"title":"みとりざん","type":"table","results":[{"column":1,"numbers":[1,2,3,4,5,6,7],"total":28}]},{"title":"かけざん","type":"list","items":[{"number":"1","expression":"234×312=","answer":"73008"}]},{"title":"わりざん","type":"list","items":[{"number":"1","expression":"27864÷448=","answer":"63"}]}]}
     """
 
 
@@ -190,7 +201,7 @@ def best_mitorizan_from_variants(image_bytes: bytes, mime_type: str):
 
 
 def best_kakezan_from_variants(image_bytes: bytes):
-    prompt = build_prompt(spatial_focus=True) + "\nかけざん・わりざんを優先して抽出せよ。"
+    prompt = build_prompt_accuracy() + "\nかけざん・わりざんを優先して抽出せよ。"
     img = Image.open(io.BytesIO(image_bytes))
     w, h = img.size
     variants = [
@@ -243,6 +254,25 @@ def enrich_mitorizan_answers(parsed):
     return parsed
 
 
+def resize_for_speed(image_bytes: bytes, max_side: int = 1700) -> tuple[bytes, str]:
+    try:
+        img = Image.open(io.BytesIO(image_bytes))
+    except Exception:
+        return image_bytes, "image/jpeg"
+
+    w, h = img.size
+    m = max(w, h)
+    if m <= max_side:
+        return image_bytes, "image/jpeg"
+
+    scale = max_side / float(m)
+    nw, nh = int(w * scale), int(h * scale)
+    img = img.resize((nw, nh))
+    buf = io.BytesIO()
+    img.save(buf, format="JPEG", quality=85)
+    return buf.getvalue(), "image/jpeg"
+
+
 def get_section(parsed, title_hint: str):
     for section in parsed.get("sections", []):
         title = str(section.get("title", ""))
@@ -277,11 +307,19 @@ def perform_ocr():
 
         data = request.json
         data_url = data['image']
+        mode = str(data.get("mode", "speed")).lower()
+        if mode not in {"accuracy", "speed"}:
+            mode = "accuracy"
         header, encoded = data_url.split(',', 1)
         mime_type = header.split(';')[0].split(':')[1] if ':' in header else "image/jpeg"
         image_bytes = base64.b64decode(encoded)
 
-        prompt = build_prompt(spatial_focus=True)
+        if mode == "speed":
+            prompt = build_prompt_speed()
+            image_bytes, mime_type = resize_for_speed(image_bytes, max_side=1700)
+        else:
+            prompt = build_prompt_accuracy()
+
         parsed = generate_json_response(prompt, image_bytes, mime_type)
         if not isinstance(parsed, dict):
             return jsonify(build_fallback_payload())
@@ -292,6 +330,7 @@ def perform_ocr():
             return jsonify(build_fallback_payload())
 
         parsed = enrich_mitorizan_answers(parsed)
+        parsed["mode"] = mode
         parsed["processing_time_ms"] = int((time.time() - time_start) * 1000)
         return jsonify(parsed)
 

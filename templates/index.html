@@ -196,6 +196,7 @@
         const statusEl = document.getElementById('status');
         const previewEl = document.getElementById('preview');
         const sectionsEl = document.getElementById('sections');
+        const OCR_MODE = 'speed';
 
         function computeCorrectAnswer(expression) {
             if (!expression) return "";
@@ -327,7 +328,7 @@
                 const response = await fetch('/ocr', {
                     method: 'POST',
                     headers: { 'Content-Type': 'application/json' },
-                    body: JSON.stringify({ image: base64Image })
+                    body: JSON.stringify({ image: base64Image, mode: OCR_MODE })
                 });
                 const data = await response.json();
 
