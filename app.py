@@ -44,65 +44,24 @@ def build_fallback_payload():
 
 
 def build_prompt(spatial_focus: bool) -> str:
-    spatial_rules = ""
-    if spatial_focus:
-        spatial_rules = """
-        空間認識ルール:
-        - 画像全体をスキャンし、見出し（みとりざん、かけざん、わりざん）の位置をまず特定せよ
-        - かけざんセクションにおいて、左側(1-3番)だけでなく、その右側に配置されている(4-6番)を絶対に見落とすな
-        - 画像右側のブロックも必ずスキャンし、見落としを防げ
-        - 『4 234×312=』のような、問題番号、式、手書き解答のセットを漏れなく抽出せよ
-        - JSONレスポンスには、読み取ったすべての問題番号を含めること
-        """
+    return """
+        OCR抽出。JSONのみ。
+        - みとりざん: 列1-4は原則7個、列5-8は原則8個を優先し、可変長で numbers を返す。
+        - みとりざん results は {column, numbers, total} を返す。
+        - かけざん: 1-6を必ず返す。左右2列(1-3,4-6)を混在させない。式は3桁×3桁として読む。
+        - わりざん: 1-3を返す。
+        - 読みにくい場合も、最も妥当な数字を1つ選ぶ。
 
-    return f"""
-        あなたは日本の学習プリント画像を解析するOCRアシスタントです。
-        画像内の各セクション（見出し）を特定し、セクションごとに最適な抽出ルールを適用してください。
-
-        対象例: 「みとりざん（表）」「かけざん（横式）」「わりざん（横式）」が同一画像に混在します。
-
-        抽出ルール:
-        - みとりざん: 15列の表として列ごとの7つの数値と合計を抽出
-        - かけざん/わりざん: 問題番号、式、手書きの解答をセットで抽出
-        - 読み取りにくい手書き数字（赤丸内など）は周囲の文脈から慎重に推論
-        {spatial_rules}
-
-        出力は以下のJSONのみ。説明文やMarkdownは禁止。
-
-        {{
-          "format_type": "multi",
-          "sections": [
-            {{
-              "title": "みとりざん",
-              "type": "table",
-              "results": [
-                {{"column": 1, "numbers": [85, 77, 59, 23, 74, 80, 97], "total": 495}}
-                ... 15 columns total ...
-              ]
-            }},
-            {{
-              "title": "かけざん",
-              "type": "list",
-              "items": [
-                {{"number": "1", "expression": "12×3=", "answer": "36"}},
-                ...
-              ]
-            }},
-            {{
-              "title": "わりざん",
-              "type": "list",
-              "items": [
-                {{"number": "1", "expression": "12÷3=", "answer": "4"}},
-                ...
-              ]
-            }}
+        JSON:
+        {
+          "format_type":"multi",
+          "sections":[
+            {"title":"みとりざん","type":"table","results":[{"column":1,"numbers":[1,2,3,4,5,6,7],"total":28}]},
+            {"title":"かけざん","type":"list","items":[{"number":"1","expression":"234×312=","answer":"73008"}]},
+            {"title":"わりざん","type":"list","items":[{"number":"1","expression":"27864÷448=","answer":"63"}]}
           ]
-        }}
-
-        追加ルール:
-        - 数値が不明な場合は0または空文字にする
-        - 必ずJSONのみを返す
-        """
+        }
+    """
 
 
 def build_mitorizan_prompt() -> str:
@@ -331,39 +290,6 @@ def perform_ocr():
             parsed["format_type"] = "multi"
         if "sections" not in parsed or not isinstance(parsed["sections"], list):
             return jsonify(build_fallback_payload())
-
-        if needs_kakezan_rescan(parsed):
-            retry_prompt = build_prompt(spatial_focus=True) + "\n再走査: かけざんの4-6番を絶対に取りこぼさず補完してJSONのみ返せ。"
-            retry_parsed = generate_json_response(retry_prompt, image_bytes, mime_type)
-            if isinstance(retry_parsed, dict) and isinstance(retry_parsed.get("sections"), list):
-                parsed = retry_parsed
-                if parsed.get("format_type") != "multi":
-                    parsed["format_type"] = "multi"
-
-        best_mitori = best_mitorizan_from_variants(image_bytes, mime_type)
-        if best_mitori is not None:
-            sections = parsed.get("sections", [])
-            replaced = False
-            for i, s in enumerate(sections):
-                title = str(s.get("title", ""))
-                if "みとり" in title and s.get("type") == "table":
-                    sections[i] = best_mitori
-                    replaced = True
-                    break
-            if not replaced:
-                sections.append(best_mitori)
-            parsed["sections"] = sections
-
-        best_kake = best_kakezan_from_variants(image_bytes)
-        if best_kake is not None:
-            sections = parsed.get("sections", [])
-            for i, s in enumerate(sections):
-                title = str(s.get("title", ""))
-                if "かけざん" in title and s.get("type") == "list":
-                    if kakezan_score(best_kake) > kakezan_score(s):
-                        sections[i] = best_kake
-                    break
-            parsed["sections"] = sections
 
         parsed = enrich_mitorizan_answers(parsed)
         parsed["processing_time_ms"] = int((time.time() - time_start) * 1000)
