@@ -9,7 +9,7 @@ from flask import Flask, request, jsonify, render_template
 from google import genai
 from google.genai import types
 from dotenv import load_dotenv
-from PIL import Image
+from PIL import Image, ImageOps
 
 load_dotenv()
 
@@ -322,6 +322,35 @@ def resize_for_speed(image_bytes: bytes, max_side: int = 1400) -> tuple[bytes, s
     return buf.getvalue(), "image/jpeg"
 
 
+def normalize_exif_orientation(image_bytes: bytes) -> bytes:
+    try:
+        img = Image.open(io.BytesIO(image_bytes))
+        img = ImageOps.exif_transpose(img).convert("RGB")
+        buf = io.BytesIO()
+        img.save(buf, format="JPEG", quality=92)
+        return buf.getvalue()
+    except Exception:
+        return image_bytes
+
+
+def transform_image(image_bytes: bytes, transform: str) -> bytes:
+    try:
+        img = Image.open(io.BytesIO(image_bytes)).convert("RGB")
+    except Exception:
+        return image_bytes
+
+    if transform == "rot180":
+        img = img.rotate(180, expand=True)
+    elif transform == "flip_lr":
+        img = img.transpose(Image.Transpose.FLIP_LEFT_RIGHT)
+    else:
+        return image_bytes
+
+    buf = io.BytesIO()
+    img.save(buf, format="JPEG", quality=92)
+    return buf.getvalue()
+
+
 def get_section(parsed, title_hint: str):
     for section in parsed.get("sections", []):
         title = str(section.get("title", ""))
@@ -390,8 +419,11 @@ def mitori_layout_valid(parsed) -> bool:
         nums = r.get("numbers", [])
         col_map[c] = len(nums) if isinstance(nums, list) else 0
 
-    expected = {1: 7, 2: 7, 3: 7, 4: 7, 5: 8, 6: 8, 7: 8, 8: 8}
-    return all(col_map.get(c, 0) == n for c, n in expected.items())
+    # Speed mode validation: allow extra rows when OCR over-segments,
+    # but require minimum expected rows for each column block.
+    first_ok = all(col_map.get(c, 0) >= 7 for c in range(1, 5))
+    latter_ok = all(col_map.get(c, 0) >= 8 for c in range(5, 9))
+    return first_ok and latter_ok
 
 
 def calc_sections_complete(parsed) -> bool:
@@ -430,6 +462,114 @@ def safe_generate_json_response(
         return None
 
 
+def parsed_completeness_score(parsed) -> int:
+    if not isinstance(parsed, dict):
+        return -1
+    score = 0
+    if mitori_has_8_columns(parsed):
+        score += 10
+    if mitori_layout_valid(parsed):
+        score += 10
+    if calc_sections_complete(parsed):
+        score += 10
+    return score
+
+
+def run_speed_pipeline(image_bytes: bytes, mime_type: str, *, allow_accuracy_fallback: bool):
+    prompt = build_prompt_speed()
+    speed_bytes, speed_mime = resize_for_speed(image_bytes, max_side=1400)
+    parsed = safe_generate_json_response(
+        prompt,
+        speed_bytes,
+        speed_mime,
+        model_id=SPEED_MODEL_ID,
+        max_output_tokens=1200,
+        temperature=0.0,
+    )
+    if not isinstance(parsed, dict):
+        parsed = safe_generate_json_response(
+            prompt,
+            speed_bytes,
+            speed_mime,
+            model_id=MODEL_ID,
+            max_output_tokens=1500,
+            temperature=0.0,
+        )
+    if not isinstance(parsed, dict):
+        return None
+
+    if not mitori_layout_valid(parsed):
+        mitori_patch = safe_generate_json_response(
+            build_mitorizan_prompt(),
+            speed_bytes,
+            speed_mime,
+            model_id=SPEED_MODEL_ID,
+            max_output_tokens=1000,
+            temperature=0.0,
+        )
+        replacement = get_section(mitori_patch, "みとり") if isinstance(mitori_patch, dict) else None
+        if replacement:
+            parsed = replace_or_append_section(parsed, "みとり", replacement)
+
+    if not mitori_layout_valid(parsed):
+        mitori_patch = safe_generate_json_response(
+            build_mitorizan_prompt(),
+            speed_bytes,
+            speed_mime,
+            model_id=MODEL_ID,
+            max_output_tokens=1100,
+            temperature=0.0,
+        )
+        replacement = get_section(mitori_patch, "みとり") if isinstance(mitori_patch, dict) else None
+        if replacement:
+            parsed = replace_or_append_section(parsed, "みとり", replacement)
+
+    if not calc_sections_complete(parsed):
+        calc_patch = safe_generate_json_response(
+            build_calc_prompt_speed(),
+            speed_bytes,
+            speed_mime,
+            model_id=SPEED_MODEL_ID,
+            max_output_tokens=700,
+            temperature=0.0,
+        )
+        if isinstance(calc_patch, dict):
+            kake = get_section(calc_patch, "かけざん")
+            wari = get_section(calc_patch, "わりざん")
+            if kake:
+                parsed = replace_or_append_section(parsed, "かけざん", kake)
+            if wari:
+                parsed = replace_or_append_section(parsed, "わりざん", wari)
+
+    if not calc_sections_complete(parsed):
+        calc_patch = safe_generate_json_response(
+            build_calc_prompt_speed(),
+            speed_bytes,
+            speed_mime,
+            model_id=MODEL_ID,
+            max_output_tokens=900,
+            temperature=0.0,
+        )
+        if isinstance(calc_patch, dict):
+            kake = get_section(calc_patch, "かけざん")
+            wari = get_section(calc_patch, "わりざん")
+            if kake:
+                parsed = replace_or_append_section(parsed, "かけざん", kake)
+            if wari:
+                parsed = replace_or_append_section(parsed, "わりざん", wari)
+
+    if allow_accuracy_fallback and (not mitori_has_8_columns(parsed) or not calc_sections_complete(parsed)):
+        parsed = safe_generate_json_response(
+            build_prompt_accuracy(),
+            speed_bytes,
+            speed_mime,
+            model_id=MODEL_ID,
+            max_output_tokens=1800,
+            temperature=0.0,
+        )
+    return parsed
+
+
 @app.route('/')
 def index():
     return render_template('index.html')
@@ -450,6 +590,7 @@ def perform_ocr():
         header, encoded = data_url.split(',', 1)
         mime_type = header.split(';')[0].split(':')[1] if ':' in header else "image/jpeg"
         image_bytes = base64.b64decode(encoded)
+        image_bytes = normalize_exif_orientation(image_bytes)
         cache_key = make_cache_key(image_bytes, mode)
         cached = get_cached_payload(cache_key)
         if cached is not None:
@@ -459,95 +600,22 @@ def perform_ocr():
             return jsonify(cached)
 
         if mode == "speed":
-            prompt = build_prompt_speed()
-            image_bytes, mime_type = resize_for_speed(image_bytes, max_side=1400)
-            parsed = safe_generate_json_response(
-                prompt,
-                image_bytes,
-                mime_type,
-                model_id=SPEED_MODEL_ID,
-                max_output_tokens=1200,
-                temperature=0.0,
-            )
-            if not isinstance(parsed, dict):
-                parsed = safe_generate_json_response(
-                    prompt,
-                    image_bytes,
-                    mime_type,
-                    model_id=MODEL_ID,
-                    max_output_tokens=1500,
-                    temperature=0.0,
-                )
-            if isinstance(parsed, dict):
-                if not mitori_layout_valid(parsed):
-                    mitori_patch = safe_generate_json_response(
-                        build_mitorizan_prompt(),
-                        image_bytes,
-                        mime_type,
-                        model_id=SPEED_MODEL_ID,
-                        max_output_tokens=1000,
-                        temperature=0.0,
-                    )
-                    replacement = get_section(mitori_patch, "みとり") if isinstance(mitori_patch, dict) else None
-                    if replacement:
-                        parsed = replace_or_append_section(parsed, "みとり", replacement)
-
-                if not mitori_layout_valid(parsed):
-                    mitori_patch = safe_generate_json_response(
-                        build_mitorizan_prompt(),
-                        image_bytes,
-                        mime_type,
-                        model_id=MODEL_ID,
-                        max_output_tokens=1100,
-                        temperature=0.0,
-                    )
-                    replacement = get_section(mitori_patch, "みとり") if isinstance(mitori_patch, dict) else None
-                    if replacement:
-                        parsed = replace_or_append_section(parsed, "みとり", replacement)
-
-                if not calc_sections_complete(parsed):
-                    calc_patch = safe_generate_json_response(
-                        build_calc_prompt_speed(),
-                        image_bytes,
-                        mime_type,
-                        model_id=SPEED_MODEL_ID,
-                        max_output_tokens=700,
-                        temperature=0.0,
-                    )
-                    if isinstance(calc_patch, dict):
-                        kake = get_section(calc_patch, "かけざん")
-                        wari = get_section(calc_patch, "わりざん")
-                        if kake:
-                            parsed = replace_or_append_section(parsed, "かけざん", kake)
-                        if wari:
-                            parsed = replace_or_append_section(parsed, "わりざん", wari)
-
-                if not calc_sections_complete(parsed):
-                    calc_patch = safe_generate_json_response(
-                        build_calc_prompt_speed(),
-                        image_bytes,
-                        mime_type,
-                        model_id=MODEL_ID,
-                        max_output_tokens=900,
-                        temperature=0.0,
-                    )
-                    if isinstance(calc_patch, dict):
-                        kake = get_section(calc_patch, "かけざん")
-                        wari = get_section(calc_patch, "わりざん")
-                        if kake:
-                            parsed = replace_or_append_section(parsed, "かけざん", kake)
-                        if wari:
-                            parsed = replace_or_append_section(parsed, "わりざん", wari)
-
-                if (not mitori_has_8_columns(parsed) or not calc_sections_complete(parsed)):
-                    parsed = safe_generate_json_response(
-                        build_prompt_accuracy(),
-                        image_bytes,
-                        mime_type,
-                        model_id=MODEL_ID,
-                        max_output_tokens=1800,
-                        temperature=0.0,
-                    )
+            parsed = run_speed_pipeline(image_bytes, mime_type, allow_accuracy_fallback=False)
+            if parsed_completeness_score(parsed) < 20:
+                candidates = [
+                    run_speed_pipeline(transform_image(image_bytes, "rot180"), mime_type, allow_accuracy_fallback=False),
+                    run_speed_pipeline(transform_image(image_bytes, "flip_lr"), mime_type, allow_accuracy_fallback=False),
+                ]
+                best = parsed
+                best_score = parsed_completeness_score(parsed)
+                for cand in candidates:
+                    score = parsed_completeness_score(cand)
+                    if score > best_score:
+                        best = cand
+                        best_score = score
+                parsed = best
+            if parsed_completeness_score(parsed) < 20:
+                parsed = run_speed_pipeline(image_bytes, mime_type, allow_accuracy_fallback=True)
             if not isinstance(parsed, dict):
                 return jsonify(build_fallback_payload())
         else:
