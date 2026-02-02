@@ -18,6 +18,7 @@ app = Flask(__name__)
 # --- 設定: APIキーとモデル設定 ---
 API_KEY = os.getenv("GEMINI_API_KEY", "")
 MODEL_ID = "models/gemini-2.5-flash"
+SPEED_MODEL_ID = "models/gemini-2.5-flash-lite"
 
 client = genai.Client(
     api_key=API_KEY,
@@ -125,21 +126,43 @@ def build_mitorizan_prompt() -> str:
     """
 
 
-def generate_json_response(prompt: str, image_bytes: bytes, mime_type: str):
+def build_calc_prompt_speed() -> str:
+    return """
+        OCR抽出。JSONのみ。
+        - かけざん: 1-6を必ず返す。左右列(1-3,4-6)を混在させない。式は3桁×3桁を優先。
+        - わりざん: 1-3を返す。
+        JSON:
+        {"format_type":"multi","sections":[{"title":"かけざん","type":"list","items":[{"number":"1","expression":"234×312=","answer":"73008"}]},{"title":"わりざん","type":"list","items":[{"number":"1","expression":"27864÷448=","answer":"63"}]}]}
+    """
+
+
+def generate_json_response(
+    prompt: str,
+    image_bytes: bytes,
+    mime_type: str,
+    *,
+    model_id: str = MODEL_ID,
+    max_output_tokens: int | None = None,
+    temperature: float | None = None,
+):
+    cfg_kwargs = {"response_mime_type": "application/json"}
+    if max_output_tokens is not None:
+        cfg_kwargs["max_output_tokens"] = max_output_tokens
+    if temperature is not None:
+        cfg_kwargs["temperature"] = temperature
+
     try:
         response = client.models.generate_content(
-            model=MODEL_ID,
+            model=model_id,
             contents=[
                 prompt,
                 types.Part.from_bytes(data=image_bytes, mime_type=mime_type),
             ],
-            config=types.GenerateContentConfig(
-                response_mime_type="application/json",
-            ),
+            config=types.GenerateContentConfig(**cfg_kwargs),
         )
     except Exception:
         response = client.models.generate_content(
-            model=MODEL_ID,
+            model=model_id,
             contents=[
                 prompt,
                 types.Part.from_bytes(data=image_bytes, mime_type=mime_type),
@@ -280,7 +303,7 @@ def enrich_mitorizan_answers(parsed):
     return parsed
 
 
-def resize_for_speed(image_bytes: bytes, max_side: int = 1700) -> tuple[bytes, str]:
+def resize_for_speed(image_bytes: bytes, max_side: int = 1400) -> tuple[bytes, str]:
     try:
         img = Image.open(io.BytesIO(image_bytes))
     except Exception:
@@ -293,9 +316,9 @@ def resize_for_speed(image_bytes: bytes, max_side: int = 1700) -> tuple[bytes, s
 
     scale = max_side / float(m)
     nw, nh = int(w * scale), int(h * scale)
-    img = img.resize((nw, nh))
+    img = img.resize((nw, nh), Image.Resampling.LANCZOS)
     buf = io.BytesIO()
-    img.save(buf, format="JPEG", quality=85)
+    img.save(buf, format="JPEG", quality=78, optimize=True)
     return buf.getvalue(), "image/jpeg"
 
 
@@ -317,6 +340,94 @@ def needs_kakezan_rescan(parsed) -> bool:
     numbers = {str(item.get("number", "")).strip() for item in items}
     required = {"1", "2", "3", "4", "5", "6"}
     return not required.issubset(numbers)
+
+
+def replace_or_append_section(parsed, title_hint: str, replacement):
+    if not isinstance(parsed, dict) or not isinstance(replacement, dict):
+        return parsed
+    sections = parsed.get("sections", [])
+    if not isinstance(sections, list):
+        parsed["sections"] = [replacement]
+        return parsed
+    for i, section in enumerate(sections):
+        if title_hint in str(section.get("title", "")):
+            sections[i] = replacement
+            return parsed
+    sections.append(replacement)
+    return parsed
+
+
+def mitori_has_8_columns(parsed) -> bool:
+    sec = get_section(parsed, "みとり")
+    if not sec:
+        return False
+    results = sec.get("results", [])
+    if not isinstance(results, list):
+        return False
+    cols = set()
+    for r in results:
+        try:
+            c = int(r.get("column"))
+        except Exception:
+            continue
+        cols.add(c)
+    return set(range(1, 9)).issubset(cols)
+
+
+def mitori_layout_valid(parsed) -> bool:
+    sec = get_section(parsed, "みとり")
+    if not sec:
+        return False
+    results = sec.get("results", [])
+    if not isinstance(results, list):
+        return False
+    col_map = {}
+    for r in results:
+        try:
+            c = int(r.get("column"))
+        except Exception:
+            continue
+        nums = r.get("numbers", [])
+        col_map[c] = len(nums) if isinstance(nums, list) else 0
+
+    expected = {1: 7, 2: 7, 3: 7, 4: 7, 5: 8, 6: 8, 7: 8, 8: 8}
+    return all(col_map.get(c, 0) == n for c, n in expected.items())
+
+
+def calc_sections_complete(parsed) -> bool:
+    kake = get_section(parsed, "かけざん")
+    wari = get_section(parsed, "わりざん")
+    if not kake or not wari:
+        return False
+    k_items = kake.get("items", [])
+    w_items = wari.get("items", [])
+    if not isinstance(k_items, list) or not isinstance(w_items, list):
+        return False
+    k_nums = {str(item.get("number", "")).strip() for item in k_items}
+    w_nums = {str(item.get("number", "")).strip() for item in w_items}
+    return {"1", "2", "3", "4", "5", "6"}.issubset(k_nums) and {"1", "2", "3"}.issubset(w_nums)
+
+
+def safe_generate_json_response(
+    prompt: str,
+    image_bytes: bytes,
+    mime_type: str,
+    *,
+    model_id: str,
+    max_output_tokens: int,
+    temperature: float = 0.0,
+):
+    try:
+        return generate_json_response(
+            prompt,
+            image_bytes,
+            mime_type,
+            model_id=model_id,
+            max_output_tokens=max_output_tokens,
+            temperature=temperature,
+        )
+    except Exception:
+        return None
 
 
 @app.route('/')
@@ -349,11 +460,105 @@ def perform_ocr():
 
         if mode == "speed":
             prompt = build_prompt_speed()
-            image_bytes, mime_type = resize_for_speed(image_bytes, max_side=1700)
+            image_bytes, mime_type = resize_for_speed(image_bytes, max_side=1400)
+            parsed = safe_generate_json_response(
+                prompt,
+                image_bytes,
+                mime_type,
+                model_id=SPEED_MODEL_ID,
+                max_output_tokens=1200,
+                temperature=0.0,
+            )
+            if not isinstance(parsed, dict):
+                parsed = safe_generate_json_response(
+                    prompt,
+                    image_bytes,
+                    mime_type,
+                    model_id=MODEL_ID,
+                    max_output_tokens=1500,
+                    temperature=0.0,
+                )
+            if isinstance(parsed, dict):
+                if not mitori_layout_valid(parsed):
+                    mitori_patch = safe_generate_json_response(
+                        build_mitorizan_prompt(),
+                        image_bytes,
+                        mime_type,
+                        model_id=SPEED_MODEL_ID,
+                        max_output_tokens=1000,
+                        temperature=0.0,
+                    )
+                    replacement = get_section(mitori_patch, "みとり") if isinstance(mitori_patch, dict) else None
+                    if replacement:
+                        parsed = replace_or_append_section(parsed, "みとり", replacement)
+
+                if not mitori_layout_valid(parsed):
+                    mitori_patch = safe_generate_json_response(
+                        build_mitorizan_prompt(),
+                        image_bytes,
+                        mime_type,
+                        model_id=MODEL_ID,
+                        max_output_tokens=1100,
+                        temperature=0.0,
+                    )
+                    replacement = get_section(mitori_patch, "みとり") if isinstance(mitori_patch, dict) else None
+                    if replacement:
+                        parsed = replace_or_append_section(parsed, "みとり", replacement)
+
+                if not calc_sections_complete(parsed):
+                    calc_patch = safe_generate_json_response(
+                        build_calc_prompt_speed(),
+                        image_bytes,
+                        mime_type,
+                        model_id=SPEED_MODEL_ID,
+                        max_output_tokens=700,
+                        temperature=0.0,
+                    )
+                    if isinstance(calc_patch, dict):
+                        kake = get_section(calc_patch, "かけざん")
+                        wari = get_section(calc_patch, "わりざん")
+                        if kake:
+                            parsed = replace_or_append_section(parsed, "かけざん", kake)
+                        if wari:
+                            parsed = replace_or_append_section(parsed, "わりざん", wari)
+
+                if not calc_sections_complete(parsed):
+                    calc_patch = safe_generate_json_response(
+                        build_calc_prompt_speed(),
+                        image_bytes,
+                        mime_type,
+                        model_id=MODEL_ID,
+                        max_output_tokens=900,
+                        temperature=0.0,
+                    )
+                    if isinstance(calc_patch, dict):
+                        kake = get_section(calc_patch, "かけざん")
+                        wari = get_section(calc_patch, "わりざん")
+                        if kake:
+                            parsed = replace_or_append_section(parsed, "かけざん", kake)
+                        if wari:
+                            parsed = replace_or_append_section(parsed, "わりざん", wari)
+
+                if (not mitori_has_8_columns(parsed) or not calc_sections_complete(parsed)):
+                    parsed = safe_generate_json_response(
+                        build_prompt_accuracy(),
+                        image_bytes,
+                        mime_type,
+                        model_id=MODEL_ID,
+                        max_output_tokens=1800,
+                        temperature=0.0,
+                    )
+            if not isinstance(parsed, dict):
+                return jsonify(build_fallback_payload())
         else:
             prompt = build_prompt_accuracy()
-
-        parsed = generate_json_response(prompt, image_bytes, mime_type)
+            parsed = generate_json_response(
+                prompt,
+                image_bytes,
+                mime_type,
+                model_id=MODEL_ID,
+                max_output_tokens=2600,
+            )
         if not isinstance(parsed, dict):
             return jsonify(build_fallback_payload())
 
