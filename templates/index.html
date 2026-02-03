@@ -62,6 +62,50 @@
             padding: 22px;
         }
 
+        .controls {
+            display: grid;
+            gap: 12px;
+            margin-bottom: 14px;
+        }
+
+        .btn-row {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+            gap: 12px;
+        }
+
+        .btn {
+            appearance: none;
+            border: none;
+            border-radius: 14px;
+            padding: 14px 16px;
+            font-size: 16px;
+            font-weight: 600;
+            cursor: pointer;
+            color: #fff;
+            background: linear-gradient(135deg, var(--accent), #0b8c7f);
+            box-shadow: 0 12px 26px rgba(15, 118, 110, 0.25);
+            text-align: center;
+        }
+
+        .btn.secondary {
+            background: #ffffff;
+            color: var(--accent);
+            border: 1px solid rgba(15, 118, 110, 0.3);
+            box-shadow: none;
+        }
+
+        .btn.ghost {
+            background: #f2f7f6;
+            color: var(--ink);
+            border: 1px dashed rgba(15, 118, 110, 0.3);
+            box-shadow: none;
+        }
+
+        .btn input {
+            display: none;
+        }
+
         #drop-area {
             border: 2px dashed rgba(15, 118, 110, 0.4);
             border-radius: 16px;
@@ -90,11 +134,148 @@
         }
 
         #preview {
+            width: 100%;
             max-height: 260px;
-            display: none;
-            margin: 14px auto 0;
+            display: block;
+            margin: 0;
+            object-fit: contain;
             border-radius: 12px;
             border: 1px solid rgba(0, 0, 0, 0.08);
+        }
+
+        .preview-wrap {
+            position: relative;
+            margin-top: 12px;
+            display: none;
+        }
+
+        .preview-wrap.show {
+            display: block;
+        }
+
+        .guide {
+            position: absolute;
+            inset: 8px;
+            border: 2px solid rgba(255, 138, 61, 0.8);
+            border-radius: 12px;
+            pointer-events: none;
+            box-shadow: inset 0 0 0 1px rgba(255, 255, 255, 0.6);
+            background: transparent;
+        }
+
+        .guide::before,
+        .guide::after {
+            content: "";
+            position: absolute;
+            inset: 0;
+            border-radius: 10px;
+            background:
+                linear-gradient(to right, rgba(255,255,255,0.45) 1px, transparent 1px) 33% 0/1px 100%,
+                linear-gradient(to right, rgba(255,255,255,0.45) 1px, transparent 1px) 66% 0/1px 100%,
+                linear-gradient(to bottom, rgba(255,255,255,0.45) 1px, transparent 1px) 0 33%/100% 1px,
+                linear-gradient(to bottom, rgba(255,255,255,0.45) 1px, transparent 1px) 0 66%/100% 1px;
+        }
+
+        .guide-tip {
+            position: absolute;
+            bottom: 10px;
+            left: 50%;
+            transform: translateX(-50%);
+            padding: 6px 10px;
+            background: rgba(0, 0, 0, 0.65);
+            color: #fff;
+            font-size: 12px;
+            border-radius: 999px;
+            letter-spacing: 0.02em;
+            pointer-events: none;
+        }
+
+        .camera-panel {
+            display: none;
+            margin-top: 16px;
+            border-radius: 16px;
+            overflow: hidden;
+            border: 1px solid rgba(0, 0, 0, 0.08);
+            background: #0f172a;
+            color: #fff;
+        }
+
+        .camera-panel.active {
+            display: block;
+        }
+
+        .camera-guide {
+            background: transparent;
+            z-index: 2;
+        }
+
+        .camera-guide::before,
+        .camera-guide::after {
+            content: none;
+        }
+
+        .camera-guide .grid-line {
+            position: absolute;
+            background: rgba(255, 255, 255, 0.25);
+        }
+
+        .camera-guide .grid-line.v1,
+        .camera-guide .grid-line.v2 {
+            top: 6%;
+            bottom: 6%;
+            width: 1px;
+        }
+
+        .camera-guide .grid-line.v1 { left: 33.33%; }
+        .camera-guide .grid-line.v2 { left: 66.66%; }
+
+        .camera-guide .grid-line.h1,
+        .camera-guide .grid-line.h2 {
+            left: 6%;
+            right: 6%;
+            height: 1px;
+        }
+
+        .camera-guide .grid-line.h1 { top: 33.33%; }
+        .camera-guide .grid-line.h2 { top: 66.66%; }
+
+        .camera-stage {
+            position: relative;
+            width: 100%;
+            aspect-ratio: 3 / 4;
+            background: #0b1220;
+        }
+
+        .camera-stage video,
+        .camera-stage canvas {
+            position: absolute;
+            inset: 0;
+            width: 100%;
+            height: 100%;
+            object-fit: cover;
+            z-index: 1;
+        }
+
+        .camera-controls {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(160px, 1fr));
+            gap: 10px;
+            padding: 12px;
+            background: #0b1220;
+        }
+
+        .camera-note {
+            padding: 0 12px 12px;
+            font-size: 13px;
+            color: rgba(255, 255, 255, 0.7);
+        }
+
+        .tips {
+            display: grid;
+            gap: 6px;
+            margin-top: 10px;
+            color: var(--muted);
+            font-size: 14px;
         }
 
         .section {
@@ -170,6 +351,8 @@
         @media (max-width: 768px) {
             .page { padding: 22px 16px 40px; }
             #drop-area { padding: 22px; }
+            .btn { font-size: 17px; padding: 16px; }
+            #preview { max-height: 320px; }
         }
     </style>
 </head>
@@ -181,11 +364,42 @@
         </header>
 
         <div class="card">
+            <div class="controls">
+                <div class="btn-row">
+                    <button id="open-camera" class="btn" type="button">🧭 ガイド付きカメラで撮影</button>
+                </div>
+                <div class="tips">
+                    <div>・プリント全体が枠に入るように少し引いて撮影</div>
+                    <div>・端が切れやすいので余白を残すのがおすすめ</div>
+                    <div>・机と平行にして傾きを減らすと精度が上がります</div>
+                </div>
+            </div>
+            <div id="camera-panel" class="camera-panel" aria-hidden="true">
+                <div class="camera-stage">
+                    <video id="camera-video" autoplay playsinline muted></video>
+                    <div class="guide camera-guide">
+                        <span class="grid-line v1"></span>
+                        <span class="grid-line v2"></span>
+                        <span class="grid-line h1"></span>
+                        <span class="grid-line h2"></span>
+                    </div>
+                    <div class="guide-tip">枠に合わせてまっすぐ撮影</div>
+                </div>
+                <div class="camera-controls">
+                    <button id="capture-photo" class="btn" type="button">📸 撮影して解析</button>
+                    <button id="close-camera" class="btn secondary" type="button">閉じる</button>
+                </div>
+                <div class="camera-note">※ iPhoneはHTTPSでないとカメラが使えない場合があります</div>
+            </div>
             <div id="drop-area">
                 <p>ここに画像をペースト (Cmd+V)</p>
-                <p class="hint">スクリーンショットや写真を貼り付けてください</p>
+                <p class="hint">クリックして画像を選択 / スクリーンショットや写真を貼り付け</p>
             </div>
-            <img id="preview" alt="preview" />
+            <div id="preview-wrap" class="preview-wrap">
+                <img id="preview" alt="preview" />
+                <div class="guide"></div>
+                <div class="guide-tip">枠に合わせてまっすぐ撮影</div>
+            </div>
             <div id="status">準備完了。画像を貼り付けてください。</div>
         </div>
 
@@ -195,8 +409,83 @@
     <script>
         const statusEl = document.getElementById('status');
         const previewEl = document.getElementById('preview');
+        const previewWrapEl = document.getElementById('preview-wrap');
         const sectionsEl = document.getElementById('sections');
         const OCR_MODE = 'speed';
+        const dropArea = document.getElementById('drop-area');
+        const openCameraBtn = document.getElementById('open-camera');
+        const cameraPanel = document.getElementById('camera-panel');
+        const cameraVideo = document.getElementById('camera-video');
+        const capturePhotoBtn = document.getElementById('capture-photo');
+        const closeCameraBtn = document.getElementById('close-camera');
+        let cameraStream = null;
+
+        function showPreview(base64Image) {
+            previewEl.src = base64Image;
+            previewWrapEl.classList.add('show');
+        }
+
+        function handleFile(file) {
+            if (!file || !file.type || !file.type.startsWith('image/')) return;
+            const reader = new FileReader();
+            reader.onload = function(event) {
+                const base64Image = event.target.result;
+                showPreview(base64Image);
+                sendToGemini(base64Image);
+            };
+            reader.readAsDataURL(file);
+        }
+
+        function stopCameraStream() {
+            if (!cameraStream) return;
+            cameraStream.getTracks().forEach(track => track.stop());
+            cameraStream = null;
+        }
+
+        async function openGuidedCamera() {
+            try {
+                if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
+                    statusEl.innerText = "❌ このブラウザはカメラに対応していません。";
+                    return;
+                }
+                if (!window.isSecureContext) {
+                    statusEl.innerText = "❌ HTTPSでアクセスしてください（カメラはHTTPS必須です）。";
+                    return;
+                }
+                statusEl.innerText = "📷 カメラの許可を待っています...";
+                try {
+                    cameraStream = await navigator.mediaDevices.getUserMedia({
+                        video: { facingMode: { ideal: "environment" } },
+                        audio: false
+                    });
+                } catch (innerErr) {
+                    cameraStream = await navigator.mediaDevices.getUserMedia({
+                        video: true,
+                        audio: false
+                    });
+                }
+                cameraVideo.srcObject = cameraStream;
+                cameraVideo.muted = true;
+                await new Promise((resolve) => {
+                    cameraVideo.onloadedmetadata = () => resolve(true);
+                });
+                await cameraVideo.play();
+                cameraPanel.classList.add('active');
+                cameraPanel.setAttribute('aria-hidden', 'false');
+                statusEl.innerText = "✅ カメラ準備完了。ガイドに合わせて撮影してください。";
+            } catch (err) {
+                const name = err && err.name ? ` (${err.name})` : "";
+                const msg = err && err.message ? ` ${err.message}` : "";
+                statusEl.innerText = `❌ カメラを起動できませんでした${name}.${msg} HTTPSか権限を確認してください。`;
+                console.error(err);
+            }
+        }
+
+        function closeGuidedCamera() {
+            stopCameraStream();
+            cameraPanel.classList.remove('active');
+            cameraPanel.setAttribute('aria-hidden', 'true');
+        }
 
         function computeCorrectAnswer(expression) {
             if (!expression) return "";
@@ -308,17 +597,34 @@
                 const item = items[index];
                 if (item.kind === 'file' && item.type.indexOf('image') !== -1) {
                     const blob = item.getAsFile();
-                    const reader = new FileReader();
-                    reader.onload = function(event) {
-                        const base64Image = event.target.result;
-                        previewEl.src = base64Image;
-                        previewEl.style.display = 'block';
-                        sendToGemini(base64Image);
-                    };
-                    reader.readAsDataURL(blob);
+                    handleFile(blob);
                 }
             }
         };
+
+        openCameraBtn.addEventListener('click', () => {
+            openGuidedCamera();
+        });
+
+        closeCameraBtn.addEventListener('click', () => {
+            closeGuidedCamera();
+        });
+
+        capturePhotoBtn.addEventListener('click', () => {
+            if (!cameraStream) return;
+            const canvas = document.createElement('canvas');
+            const width = cameraVideo.videoWidth || 1080;
+            const height = cameraVideo.videoHeight || 1440;
+            canvas.width = width;
+            canvas.height = height;
+            const ctx = canvas.getContext('2d');
+            if (!ctx) return;
+            ctx.drawImage(cameraVideo, 0, 0, width, height);
+            const base64Image = canvas.toDataURL('image/jpeg', 0.92);
+            showPreview(base64Image);
+            closeGuidedCamera();
+            sendToGemini(base64Image);
+        });
 
         async function sendToGemini(base64Image) {
             statusEl.innerText = "⏳ 構造を解析中...";
