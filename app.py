@@ -136,6 +136,24 @@ def build_calc_prompt_speed() -> str:
     """
 
 
+def build_warizan_prompt_speed() -> str:
+    return """
+        わりざんのみ抽出。JSONのみ。
+        - わりざん: 1-3を必ず返す。
+        JSON:
+        {"format_type":"multi","sections":[{"title":"わりざん","type":"list","items":[{"number":"1","expression":"27864÷448=","answer":"63"}]}]}
+    """
+
+
+def build_section_presence_prompt() -> str:
+    return """
+        画像内に以下のセクションが存在するか判定してください。
+        対象: みとりざん / かけざん / わりざん
+        出力はJSONのみ:
+        {"mitori": true, "kake": false, "wari": false}
+    """
+
+
 def generate_json_response(
     prompt: str,
     image_bytes: bytes,
@@ -442,6 +460,17 @@ def calc_sections_complete(parsed) -> bool:
     return {"1", "2", "3", "4", "5", "6"}.issubset(k_nums) and {"1", "2", "3"}.issubset(w_nums)
 
 
+def warizan_complete(parsed) -> bool:
+    wari = get_section(parsed, "わりざん")
+    if not wari:
+        return False
+    w_items = wari.get("items", [])
+    if not isinstance(w_items, list):
+        return False
+    w_nums = {str(item.get("number", "")).strip() for item in w_items}
+    return {"1", "2", "3"}.issubset(w_nums)
+
+
 def safe_generate_json_response(
     prompt: str,
     image_bytes: bytes,
@@ -462,6 +491,59 @@ def safe_generate_json_response(
         )
     except Exception:
         return None
+
+
+def detect_section_presence(image_bytes: bytes) -> dict:
+    prompt = build_section_presence_prompt()
+    try:
+        img = Image.open(io.BytesIO(image_bytes)).convert("RGB")
+    except Exception:
+        return {"mitori": True, "kake": True, "wari": True}
+
+    w, h = img.size
+    m = max(w, h)
+    if m > 800:
+        scale = 800 / float(m)
+        img = img.resize((int(w * scale), int(h * scale)), Image.Resampling.BILINEAR)
+    buf = io.BytesIO()
+    img.save(buf, format="JPEG", quality=60, optimize=True)
+
+    parsed = safe_generate_json_response(
+        prompt,
+        buf.getvalue(),
+        "image/jpeg",
+        model_id=SPEED_MODEL_ID,
+        max_output_tokens=120,
+        temperature=0.0,
+    )
+    if not isinstance(parsed, dict):
+        return {"mitori": True, "kake": True, "wari": True}
+
+    return {
+        "mitori": bool(parsed.get("mitori", True)),
+        "kake": bool(parsed.get("kake", True)),
+        "wari": bool(parsed.get("wari", True)),
+    }
+
+
+def filter_sections_by_presence(parsed: dict, presence: dict) -> dict:
+    if not isinstance(parsed, dict):
+        return parsed
+    sections = parsed.get("sections", [])
+    if not isinstance(sections, list):
+        return parsed
+    allowed = []
+    for section in sections:
+        title = str(section.get("title", ""))
+        if "みとり" in title and not presence.get("mitori", True):
+            continue
+        if "かけ" in title and not presence.get("kake", True):
+            continue
+        if "わり" in title and not presence.get("wari", True):
+            continue
+        allowed.append(section)
+    parsed["sections"] = allowed
+    return parsed
 
 
 def parsed_completeness_score(parsed) -> int:
@@ -587,12 +669,14 @@ def perform_ocr():
         data = request.json
         data_url = data['image']
         mode = str(data.get("mode", "speed")).lower()
+        auto_sections = bool(data.get("auto_sections", True))
         if mode not in {"accuracy", "speed"}:
             mode = "accuracy"
         header, encoded = data_url.split(',', 1)
         mime_type = header.split(';')[0].split(':')[1] if ':' in header else "image/jpeg"
         image_bytes = base64.b64decode(encoded)
         image_bytes = normalize_exif_orientation(image_bytes)
+        presence = detect_section_presence(image_bytes) if auto_sections else {"mitori": True, "kake": True, "wari": True}
         cache_key = make_cache_key(image_bytes, mode)
         cached = get_cached_payload(cache_key)
         if cached is not None:
@@ -608,7 +692,7 @@ def perform_ocr():
 
             # Keep speed mode bounded: only try rotations when the first result is clearly broken
             # and the request is still within a small time budget.
-            if base_score < 10 and elapsed_ms < 15000:
+            if presence.get("mitori", True) and base_score < 10 and elapsed_ms < 15000:
                 candidates = [
                     run_speed_pipeline(transform_image(image_bytes, "rot90"), mime_type, allow_accuracy_fallback=False),
                     run_speed_pipeline(transform_image(image_bytes, "rot270"), mime_type, allow_accuracy_fallback=False),
@@ -624,6 +708,20 @@ def perform_ocr():
                     if best_score >= 20:
                         break
                 parsed = best
+            # Warizan-only reinforcement (bounded) to improve division accuracy without extra full passes.
+            elapsed_ms = int((time.time() - time_start) * 1000)
+            if presence.get("wari", True) and isinstance(parsed, dict) and not warizan_complete(parsed) and elapsed_ms < 12000:
+                wari_patch = safe_generate_json_response(
+                    build_warizan_prompt_speed(),
+                    image_bytes,
+                    mime_type,
+                    model_id=SPEED_MODEL_ID,
+                    max_output_tokens=500,
+                    temperature=0.0,
+                )
+                replacement = get_section(wari_patch, "わりざん") if isinstance(wari_patch, dict) else None
+                if replacement:
+                    parsed = replace_or_append_section(parsed, "わりざん", replacement)
             if not isinstance(parsed, dict):
                 return jsonify(build_fallback_payload())
         else:
@@ -643,6 +741,7 @@ def perform_ocr():
         if "sections" not in parsed or not isinstance(parsed["sections"], list):
             return jsonify(build_fallback_payload())
 
+        parsed = filter_sections_by_presence(parsed, presence)
         parsed = enrich_mitorizan_answers(parsed)
         set_cached_payload(cache_key, parsed)
         parsed["mode"] = mode
