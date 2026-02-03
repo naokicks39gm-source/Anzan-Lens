@@ -75,6 +75,7 @@ def build_prompt_accuracy() -> str:
         OCR抽出。JSONのみ。
         - みとりざん: 列1-4は原則7個、列5-8は原則8個を優先し、可変長で numbers を返す。
         - みとりざん results は {column, numbers, total} を返す。
+        - あんざん: 表の列ごとに numbers を返す（各列4行想定）。
         - かけざん: 1-6を必ず返す。左右2列(1-3,4-6)を混在させない。式は3桁×3桁として読む。
         - わりざん: 1-3を返す。
         - 読みにくい場合も、最も妥当な数字を1つ選ぶ。
@@ -84,6 +85,7 @@ def build_prompt_accuracy() -> str:
           "format_type":"multi",
           "sections":[
             {"title":"みとりざん","type":"table","results":[{"column":1,"numbers":[1,2,3,4,5,6,7],"total":28}]},
+            {"title":"あんざん","type":"table","results":[{"column":1,"numbers":[50,14,26,70]}]},
             {"title":"かけざん","type":"list","items":[{"number":"1","expression":"234×312=","answer":"73008"}]},
             {"title":"わりざん","type":"list","items":[{"number":"1","expression":"27864÷448=","answer":"63"}]}
           ]
@@ -95,10 +97,11 @@ def build_prompt_speed() -> str:
     return """
         OCRを高速に実行。JSONのみ。
         - みとりざん: 列1-4は7個、列5-8は8個を優先。resultsは {column, numbers, total}。
+        - あんざん: 表の列ごとに numbers を返す（各列4行想定）。
         - かけざん: 1-6を返す。左右列(1-3,4-6)を混在させない。式は3桁×3桁を優先。
         - わりざん: 1-3を返す。
         JSON:
-        {"format_type":"multi","sections":[{"title":"みとりざん","type":"table","results":[{"column":1,"numbers":[1,2,3,4,5,6,7],"total":28}]},{"title":"かけざん","type":"list","items":[{"number":"1","expression":"234×312=","answer":"73008"}]},{"title":"わりざん","type":"list","items":[{"number":"1","expression":"27864÷448=","answer":"63"}]}]}
+        {"format_type":"multi","sections":[{"title":"みとりざん","type":"table","results":[{"column":1,"numbers":[1,2,3,4,5,6,7],"total":28}]},{"title":"あんざん","type":"table","results":[{"column":1,"numbers":[50,14,26,70]}]},{"title":"かけざん","type":"list","items":[{"number":"1","expression":"234×312=","answer":"73008"}]},{"title":"わりざん","type":"list","items":[{"number":"1","expression":"27864÷448=","answer":"63"}]}]}
     """
 
 
@@ -145,12 +148,33 @@ def build_warizan_prompt_speed() -> str:
     """
 
 
+def build_anzan_prompt_speed() -> str:
+    return """
+        あんざんのみ抽出。JSONのみ。
+        - 表の列ごとに numbers を返す（各列4行想定）。
+        JSON:
+        {"format_type":"multi","sections":[{"title":"あんざん","type":"table","results":[{"column":1,"numbers":[50,14,26,70]}]}]}
+    """
+
+
+def build_wari_anzan_prompt_speed() -> str:
+    return """
+        わりざんとあんざんを抽出。JSONのみ。
+        - わりざん: 1-20を返す。
+        - あんざん: 表の列ごとに numbers を返す（各列4行想定）。
+        JSON:
+        {"format_type":"multi","sections":[{"title":"わりざん","type":"list","items":[{"number":"1","expression":"27864÷448=","answer":"63"}]},{"title":"あんざん","type":"table","results":[{"column":1,"numbers":[50,14,26,70]}]}]}
+    """
+
+
 def build_section_presence_prompt() -> str:
     return """
         画像内に以下のセクションが存在するか判定してください。
-        対象: みとりざん / かけざん / わりざん
+        対象: みとりざん / あんざん / かけざん / わりざん
+        あんざんの特徴: 小さな表形式で、列ごとに2〜4段の数字が並ぶ（見出しが「あんざん」）。
+        不明な場合は true を返してください（見落とし防止）。
         出力はJSONのみ:
-        {"mitori": true, "kake": false, "wari": false}
+        {"mitori": true, "anzan": false, "kake": false, "wari": false}
     """
 
 
@@ -321,7 +345,55 @@ def enrich_mitorizan_answers(parsed):
     return parsed
 
 
-def resize_for_speed(image_bytes: bytes, max_side: int = 1400) -> tuple[bytes, str]:
+def normalize_number_text(value: str) -> str:
+    return str(value).replace(",", "").strip()
+
+
+def compute_correct_answer(expression: str) -> str:
+    expr = normalize_number_text(expression)
+    expr = expr.replace("×", "*").replace("x", "*").replace("X", "*").replace("÷", "/").replace("＝", "=")
+    expr = expr.replace("=", "")
+    # Extract two operands.
+    nums = re.findall(r"-?\d+", expr)
+    if len(nums) < 2:
+        return ""
+    try:
+        a = int(nums[0])
+        b = int(nums[1])
+    except Exception:
+        return ""
+    if "*" in expr:
+        return str(a * b)
+    if "/" in expr:
+        if b == 0:
+            return ""
+        return str(a // b)
+    return ""
+
+
+def enrich_calc_answers(parsed):
+    if not isinstance(parsed, dict):
+        return parsed
+    for section in parsed.get("sections", []):
+        if section.get("type") != "list":
+            continue
+        title = str(section.get("title", ""))
+        if "かけ" not in title and "わり" not in title:
+            continue
+        items = section.get("items", [])
+        if not isinstance(items, list):
+            continue
+        for item in items:
+            expr = str(item.get("expression", ""))
+            correct = compute_correct_answer(expr)
+            item["correct_answer"] = correct
+            student = item.get("answer", "")
+            if correct and student != "":
+                item["is_correct"] = normalize_number_text(student) == correct
+    return parsed
+
+
+def resize_for_speed(image_bytes: bytes, max_side: int = 1000) -> tuple[bytes, str]:
     try:
         img = Image.open(io.BytesIO(image_bytes))
     except Exception:
@@ -519,11 +591,16 @@ def detect_section_presence(image_bytes: bytes) -> dict:
     if not isinstance(parsed, dict):
         return {"mitori": True, "kake": True, "wari": True}
 
-    return {
+    result = {
         "mitori": bool(parsed.get("mitori", True)),
+        "anzan": bool(parsed.get("anzan", True)),
         "kake": bool(parsed.get("kake", True)),
         "wari": bool(parsed.get("wari", True)),
     }
+    # Bias toward detecting anzan when only warizan is present (avoid false negatives).
+    if result.get("wari") and not result.get("mitori") and not result.get("anzan"):
+        result["anzan"] = True
+    return result
 
 
 def filter_sections_by_presence(parsed: dict, presence: dict) -> dict:
@@ -536,6 +613,8 @@ def filter_sections_by_presence(parsed: dict, presence: dict) -> dict:
     for section in sections:
         title = str(section.get("title", ""))
         if "みとり" in title and not presence.get("mitori", True):
+            continue
+        if "あんざん" in title and not presence.get("anzan", True):
             continue
         if "かけ" in title and not presence.get("kake", True):
             continue
@@ -561,7 +640,7 @@ def parsed_completeness_score(parsed) -> int:
 
 def run_speed_pipeline(image_bytes: bytes, mime_type: str, *, allow_accuracy_fallback: bool):
     prompt = build_prompt_speed()
-    speed_bytes, speed_mime = resize_for_speed(image_bytes, max_side=1400)
+    speed_bytes, speed_mime = resize_for_speed(image_bytes, max_side=1200)
     parsed = safe_generate_json_response(
         prompt,
         speed_bytes,
@@ -654,6 +733,52 @@ def run_speed_pipeline(image_bytes: bytes, mime_type: str, *, allow_accuracy_fal
     return parsed
 
 
+def run_speed_pipeline_fast(image_bytes: bytes, mime_type: str, presence: dict):
+    # Single-pass speed mode for <10s target.
+    if presence.get("mitori", True):
+        prompt = build_prompt_speed()
+        max_tokens = 1100
+        max_side = 1000
+    elif presence.get("anzan", False) and not presence.get("kake", False) and not presence.get("wari", False):
+        prompt = build_anzan_prompt_speed()
+        max_tokens = 900
+        max_side = 1100
+    elif presence.get("anzan", False) and presence.get("wari", False) and not presence.get("kake", False):
+        prompt = build_wari_anzan_prompt_speed()
+        max_tokens = 1200
+        max_side = 1200
+    elif presence.get("wari", True) and not presence.get("kake", False):
+        # Warizan-only sheets need a focused prompt and a bit more resolution.
+        prompt = build_warizan_prompt_speed()
+        max_tokens = 1200
+        max_side = 1200
+    else:
+        # Calc-only sheets (kake/warizan) need a focused prompt.
+        prompt = build_calc_prompt_speed()
+        max_tokens = 900
+        max_side = 1000
+
+    speed_bytes, speed_mime = resize_for_speed(image_bytes, max_side=max_side)
+    return safe_generate_json_response(
+        prompt,
+        speed_bytes,
+        speed_mime,
+        model_id=SPEED_MODEL_ID,
+        max_output_tokens=max_tokens,
+        temperature=0.0,
+    )
+
+
+def warizan_item_count(parsed) -> int:
+    if not isinstance(parsed, dict):
+        return 0
+    section = get_section(parsed, "わりざん")
+    if not section:
+        return 0
+    items = section.get("items", [])
+    return len(items) if isinstance(items, list) else 0
+
+
 @app.route('/')
 def index():
     return render_template('index.html')
@@ -676,7 +801,7 @@ def perform_ocr():
         mime_type = header.split(';')[0].split(':')[1] if ':' in header else "image/jpeg"
         image_bytes = base64.b64decode(encoded)
         image_bytes = normalize_exif_orientation(image_bytes)
-        presence = detect_section_presence(image_bytes) if auto_sections else {"mitori": True, "kake": True, "wari": True}
+        presence = detect_section_presence(image_bytes) if auto_sections else {"mitori": True, "anzan": True, "kake": True, "wari": True}
         cache_key = make_cache_key(image_bytes, mode)
         cached = get_cached_payload(cache_key)
         if cached is not None:
@@ -686,42 +811,34 @@ def perform_ocr():
             return jsonify(cached)
 
         if mode == "speed":
-            parsed = run_speed_pipeline(image_bytes, mime_type, allow_accuracy_fallback=False)
-            base_score = parsed_completeness_score(parsed)
-            elapsed_ms = int((time.time() - time_start) * 1000)
-
-            # Keep speed mode bounded: only try rotations when the first result is clearly broken
-            # and the request is still within a small time budget.
-            if presence.get("mitori", True) and base_score < 10 and elapsed_ms < 15000:
-                candidates = [
-                    run_speed_pipeline(transform_image(image_bytes, "rot90"), mime_type, allow_accuracy_fallback=False),
-                    run_speed_pipeline(transform_image(image_bytes, "rot270"), mime_type, allow_accuracy_fallback=False),
-                    run_speed_pipeline(transform_image(image_bytes, "rot180"), mime_type, allow_accuracy_fallback=False),
-                ]
-                best = parsed
-                best_score = base_score
-                for cand in candidates:
-                    score = parsed_completeness_score(cand)
-                    if score > best_score:
-                        best = cand
-                        best_score = score
-                    if best_score >= 20:
-                        break
-                parsed = best
-            # Warizan-only reinforcement (bounded) to improve division accuracy without extra full passes.
-            elapsed_ms = int((time.time() - time_start) * 1000)
-            if presence.get("wari", True) and isinstance(parsed, dict) and not warizan_complete(parsed) and elapsed_ms < 12000:
-                wari_patch = safe_generate_json_response(
-                    build_warizan_prompt_speed(),
-                    image_bytes,
-                    mime_type,
-                    model_id=SPEED_MODEL_ID,
-                    max_output_tokens=500,
-                    temperature=0.0,
-                )
-                replacement = get_section(wari_patch, "わりざん") if isinstance(wari_patch, dict) else None
-                if replacement:
-                    parsed = replace_or_append_section(parsed, "わりざん", replacement)
+            # Speed-priority mode: single pass, no extra retries.
+            parsed = run_speed_pipeline_fast(image_bytes, mime_type, presence)
+            # Warizan-only fallback: if too few items, retry once with larger size (bounded).
+            if presence.get("wari", False) and not presence.get("mitori", False) and not presence.get("kake", False):
+                elapsed_ms = int((time.time() - time_start) * 1000)
+                if warizan_item_count(parsed) < 10 and elapsed_ms < 8000:
+                    bigger_bytes, bigger_mime = resize_for_speed(image_bytes, max_side=1400)
+                    parsed = safe_generate_json_response(
+                        build_warizan_prompt_speed(),
+                        bigger_bytes,
+                        bigger_mime,
+                        model_id=SPEED_MODEL_ID,
+                        max_output_tokens=1300,
+                        temperature=0.0,
+                    )
+            # If calc-only sheet returns empty, retry once with a slightly larger size (bounded).
+            if (not isinstance(parsed, dict) or not parsed.get("sections")) and not presence.get("mitori", True):
+                elapsed_ms = int((time.time() - time_start) * 1000)
+                if elapsed_ms < 8000:
+                    bigger_bytes, bigger_mime = resize_for_speed(image_bytes, max_side=1400)
+                    parsed = safe_generate_json_response(
+                        build_calc_prompt_speed(),
+                        bigger_bytes,
+                        bigger_mime,
+                        model_id=SPEED_MODEL_ID,
+                        max_output_tokens=1000,
+                        temperature=0.0,
+                    )
             if not isinstance(parsed, dict):
                 return jsonify(build_fallback_payload())
         else:
@@ -743,6 +860,7 @@ def perform_ocr():
 
         parsed = filter_sections_by_presence(parsed, presence)
         parsed = enrich_mitorizan_answers(parsed)
+        parsed = enrich_calc_answers(parsed)
         set_cached_payload(cache_key, parsed)
         parsed["mode"] = mode
         parsed["cached"] = False
